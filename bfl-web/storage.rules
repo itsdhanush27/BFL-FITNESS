@@ -1,0 +1,49 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && (
+        request.auth.uid == userId ||
+        (request.auth.token.email != null && request.auth.token.email.lower() == userId.lower())
+      );
+    }
+
+    function isCoachOrAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'coach' ||
+        request.auth.token.role == 'admin' ||
+        (request.auth.token.email != null && request.auth.token.email.matches('.*@bflfitness[.]com'))
+      );
+    }
+
+    function isValidImage() {
+      return request.resource.contentType.matches('image/.*')
+        && request.resource.size < 20 * 1024 * 1024; // 20MB limit
+    }
+
+    // Check-in photos partitioned strictly per authenticated client ID:
+    // /checkin-photos/{userId}/{fileName}
+    match /checkin-photos/{userId}/{fileName} {
+      // Clients can read their own photos; coaches and admins can view and audit client photos
+      allow read: if isOwner(userId) || isCoachOrAdmin();
+      // Only the authenticated client can upload photos into their own folder
+      allow write: if isOwner(userId) && isValidImage();
+      // Only owner or coach/admin can delete photos
+      allow delete: if isOwner(userId) || isCoachOrAdmin();
+    }
+
+    // Nested user progress photos:
+    // /users/{userId}/{allPaths=**}
+    match /users/{userId}/{allPaths=**} {
+      allow read: if isOwner(userId) || isCoachOrAdmin();
+      allow write: if isOwner(userId) && isValidImage();
+      allow delete: if isOwner(userId) || isCoachOrAdmin();
+    }
+  }
+}

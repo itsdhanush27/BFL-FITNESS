@@ -1,0 +1,189 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(clientId) {
+      return isAuthenticated() && (
+        request.auth.uid == clientId || 
+        (request.auth.token.email != null && request.auth.token.email.lower() == clientId.lower())
+      );
+    }
+
+    function isCoachOrAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'coach' || 
+        request.auth.token.role == 'admin' ||
+        (request.auth.token.email != null && request.auth.token.email.matches('.*@bflfitness[.]com'))
+      );
+    }
+
+    // Subscription access check: verifies the target client has an active subscription.
+    function isClientSubscriptionActive(clientId) {
+      let clientDoc = get(/databases/$(database)/documents/users/$(clientId)).data;
+      return clientDoc != null && (
+        clientDoc.subscriptionStatus == 'active' ||
+        clientDoc.subscriptionStatus == 'past_due' ||
+        (clientDoc.subscriptionStatus == 'cancelled' && clientDoc.status == 'active') ||
+        (clientDoc.subscriptionStatus == null && clientDoc.status == 'active')
+      ) && clientDoc.subscriptionStatus != 'expired' && clientDoc.status != 'expired';
+    }
+
+    // Workouts Collection Rules
+    match /workouts/{workoutId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.clientId) || 
+        isCoachOrAdmin()
+      );
+
+      allow create: if isCoachOrAdmin() && (
+        !('clientId' in request.resource.data) ||
+        request.resource.data.clientId == '' ||
+        isClientSubscriptionActive(request.resource.data.clientId)
+      );
+
+      allow update: if isAuthenticated() && (
+        (isCoachOrAdmin() && (
+          !('clientId' in resource.data) ||
+          resource.data.clientId == '' ||
+          isClientSubscriptionActive(resource.data.clientId)
+        )) ||
+        (
+          isOwner(resource.data.clientId) &&
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasAny(['rating', 'feedback', 'clientGeneralFeedback']) ? (
+              request.resource.data.rating is int &&
+              request.resource.data.rating >= 1 &&
+              request.resource.data.rating <= 5 &&
+              (
+                !('feedback' in request.resource.data) || 
+                (request.resource.data.feedback is string && request.resource.data.feedback.size() <= 1000)
+              ) &&
+              (
+                !('clientGeneralFeedback' in request.resource.data) || 
+                (request.resource.data.clientGeneralFeedback is string && request.resource.data.clientGeneralFeedback.size() <= 1000)
+              )
+            ) : true
+          )
+        )
+      );
+
+      allow delete: if isCoachOrAdmin();
+    }
+
+    // Checkins Collection Rules
+    match /checkins/{checkInId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.clientId) || 
+        isCoachOrAdmin()
+      );
+      allow create: if isAuthenticated() && (
+        isOwner(request.resource.data.clientId) ||
+        isCoachOrAdmin()
+      );
+      allow update: if isCoachOrAdmin() || isOwner(resource.data.clientId);
+      allow delete: if isCoachOrAdmin();
+    }
+
+    // Nutrition Collection Rules
+    match /nutrition/{clientId} {
+      allow read: if isAuthenticated() && (isOwner(clientId) || isCoachOrAdmin());
+      allow write: if isCoachOrAdmin() && isClientSubscriptionActive(clientId);
+    }
+
+    // Intakes Collection Rules
+    match /intakes/{intakeId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.clientId) || 
+        isCoachOrAdmin()
+      );
+      allow create: if isAuthenticated();
+      allow update, delete: if isCoachOrAdmin();
+    }
+
+    // Users Collection Rules
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && (request.auth.uid == userId || isCoachOrAdmin());
+      allow update: if isAuthenticated() && (
+        isCoachOrAdmin() || 
+        request.auth.uid == userId
+      );
+      allow delete: if isCoachOrAdmin();
+    }
+
+    // Subscriptions Collection Rules
+    match /subscriptions/{subId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.clientId) || 
+        isCoachOrAdmin()
+      );
+      allow create, update: if isAuthenticated();
+      allow delete: if isCoachOrAdmin();
+    }
+
+    // Transactions Collection Rules
+    match /transactions/{txId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.clientId) || 
+        isCoachOrAdmin()
+      );
+      allow create: if isAuthenticated();
+      allow update, delete: if isCoachOrAdmin();
+    }
+
+    // Archived Programs Collection Rules
+    match /archived_programs/{archiveId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.clientId) || 
+        isCoachOrAdmin()
+      );
+      allow create, update, delete: if isCoachOrAdmin();
+    }
+
+    // Coaching Tiers and Plans Catalog
+    match /coaching_tiers/{tierId} {
+      allow read: if isAuthenticated();
+      allow write: if isCoachOrAdmin();
+    }
+
+    match /plans/{planId} {
+      allow read: if isAuthenticated();
+      allow write: if isCoachOrAdmin();
+    }
+
+    // Notifications Collection Rules
+    match /notifications/{notifId} {
+      allow read, create, update: if isAuthenticated();
+      allow delete: if isCoachOrAdmin();
+    }
+
+    // Messages Collection Rules
+    match /messages/{messageId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+    }
+
+    // Coaches Collection Rules
+    match /coaches/{coachId} {
+      allow read: if isAuthenticated();
+      allow write: if isCoachOrAdmin();
+    }
+
+    // Metrics Collection Rules
+    match /metrics/{metricId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+    }
+
+    // Progress Photos Collection Rules
+    match /progress_photos/{photoId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+    }
+  }
+}

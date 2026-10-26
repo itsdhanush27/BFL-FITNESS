@@ -1,0 +1,6 @@
+{
+  "name": "BFL Fitness",
+  "description": "BFL Fitness Website and Client Coaching Portal - Elite 1-on-1 coaching, custom workout programming, nutrition tracking, and client portal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
