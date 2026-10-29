@@ -106,9 +106,16 @@ export const ClientDashboard: React.FC<ClientDashboardProps> = ({ onLogout, init
     isPendingCoachApproval: livePendingApproval,
     isActive: liveIsActive,
     activePlanName: liveActivePlanName,
+    activePlanPrice: liveActivePlanPrice,
     pendingPlanName: livePendingPlanName,
     pendingPlanPrice: livePendingPlanPrice,
-    planExpiresAt: livePlanExpiresAt
+    planExpiresAt: livePlanExpiresAt,
+    billingCycle: liveBillingCycle,
+    remainingSessionCredits: liveRemainingCredits,
+    isCancelled: liveIsCancelled,
+    cancellationRequestedAt: liveCancellationRequestedAt,
+    pendingDowngradePlanName: livePendingDowngradePlanName,
+    downgradeEffectiveAt: liveDowngradeEffectiveAt,
   } = useClientSubscription(user?.uid);
 
   // Cross-check the live clients roster (updated synchronously by coach approval)
@@ -175,17 +182,34 @@ export const ClientDashboard: React.FC<ClientDashboardProps> = ({ onLogout, init
       } catch {}
     }
   }, [isCoachApproved, clientIntake]);
+
+  const activePlan = coachingPlans.find(p => p.id === user?.activePlanId) || coachingPlans[0];
+  const billingCycle = liveBillingCycle || user?.billingCycle || (clientRosterEntry as any)?.billingCycle || activePlan?.billingCycle || 'monthly';
+  const remainingSessionCredits = liveRemainingCredits !== undefined ? liveRemainingCredits : (user?.remainingSessionCredits ?? (clientRosterEntry as any)?.remainingSessionCredits);
+  const pendingDowngradePlanName = livePendingDowngradePlanName || (user as any)?.pendingDowngradePlanName || (clientRosterEntry as any)?.pendingDowngradePlanName;
+  const downgradeEffectiveAt = liveDowngradeEffectiveAt || (user as any)?.downgradeEffectiveAt || (clientRosterEntry as any)?.downgradeEffectiveAt;
+  const cancellationRequestedAt = liveCancellationRequestedAt || (user as any)?.cancellationRequestedAt || (clientRosterEntry as any)?.cancellationRequestedAt;
+
+  const effectiveExpiresAt = livePlanExpiresAt || clientRosterEntry?.planExpiresAt || user?.planExpiresAt;
+  const effectiveStartedAt = clientRosterEntry?.packageStartedAt || user?.packageStartedAt;
+
   const clientSubAccess = checkSubscriptionAccess({ 
-    planExpiresAt: clientRosterEntry?.planExpiresAt ?? user?.planExpiresAt, 
+    planExpiresAt: effectiveExpiresAt, 
     subscriptionStatus: effectiveSubStatus, 
     status: effectiveStatus,
-    packageStartedAt: clientRosterEntry?.packageStartedAt ?? user?.packageStartedAt,
-    cancellationRequestedAt: (clientRosterEntry as any)?.cancellationRequestedAt ?? (user as any)?.cancellationRequestedAt,
+    packageStartedAt: effectiveStartedAt,
+    cancellationRequestedAt: cancellationRequestedAt,
+    billingCycle: (billingCycle as any),
+    sessionCredits: user?.sessionCredits ?? (clientRosterEntry as any)?.sessionCredits,
+    usedSessionCredits: user?.usedSessionCredits ?? (clientRosterEntry as any)?.usedSessionCredits,
   });
   const isExpired = !isRenewalPending && !clientSubAccess.canReceiveCoaching;
-  const daysRemaining = getDaysRemaining(user?.planExpiresAt);
-  const expiryFormatted = user?.planExpiresAt 
-    ? new Date(user.planExpiresAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  const daysRemaining = getDaysRemaining(effectiveExpiresAt);
+  const hoursRemaining = effectiveExpiresAt ? Math.max(0, Math.round((new Date(effectiveExpiresAt).getTime() - Date.now()) / (1000 * 60 * 60))) : 999;
+  const isExpiringWithin24h = hoursRemaining <= 24 && hoursRemaining > 0;
+  const isExpiringWithin3Days = daysRemaining <= 3 && daysRemaining > 0;
+  const expiryFormatted = effectiveExpiresAt 
+    ? new Date(effectiveExpiresAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
     : null;
 
   const [selectedRenewalPlanId, setSelectedRenewalPlanId] = useState<string>(user?.activePlanId || coachingPlans[0]?.id || 'plan_online_monthly');
@@ -212,7 +236,6 @@ export const ClientDashboard: React.FC<ClientDashboardProps> = ({ onLogout, init
   const clientCoachId = user?.assignedCoachId || user?.coachId || (clientIntake as any)?.assignedCoachId || (clientIntake as any)?.coachId;
 
   // Accurately resolve client plan name and price from roster or intake
-  const activePlan = coachingPlans.find(p => p.id === user?.activePlanId) || coachingPlans[0];
 
   const displayPlanName = 
     clientRosterEntry?.planName ||
@@ -468,12 +491,12 @@ export const ClientDashboard: React.FC<ClientDashboardProps> = ({ onLogout, init
               <p className="text-xs text-neutral-500 mt-0.5 flex flex-wrap items-center gap-2">
                 <span>Coach: <strong className="text-neutral-800">{assignedCoach.name}</strong></span>
                 <span>&bull;</span>
-                <span>Plan: <strong className="text-red-600 font-semibold">{displayPlanName}</strong></span>
+                <span>Plan: <strong className="text-red-600 font-semibold">{displayPlanName} ({billingCycle.toUpperCase()})</strong></span>
                 {isExpired ? (
                   <>
                     <span>&bull;</span>
                     <span className="px-2 py-0.5 rounded-md bg-red-50 text-red-700 font-bold border border-red-200">
-                      Package Finished {expiryFormatted ? `(${expiryFormatted})` : ''}
+                      {billingCycle === 'hourly' ? '0 Session Credits Left' : `Package Finished ${expiryFormatted ? `(${expiryFormatted})` : ''}`}
                     </span>
                   </>
                 ) : isRenewalPending ? (
@@ -483,7 +506,14 @@ export const ClientDashboard: React.FC<ClientDashboardProps> = ({ onLogout, init
                       Awaiting Coach Review & Activation...
                     </span>
                   </>
-                ) : user?.planExpiresAt ? (
+                ) : billingCycle === 'hourly' ? (
+                  <>
+                    <span>&bull;</span>
+                    <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 font-bold border border-emerald-200">
+                      {remainingSessionCredits !== undefined ? remainingSessionCredits : 1} Session Credit{remainingSessionCredits === 1 ? '' : 's'} Remaining (Window: {expiryFormatted})
+                    </span>
+                  </>
+                ) : effectiveExpiresAt ? (
                   <>
                     <span>&bull;</span>
                     <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 font-bold border border-emerald-200">
@@ -496,6 +526,14 @@ export const ClientDashboard: React.FC<ClientDashboardProps> = ({ onLogout, init
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setProfileModalOpen(true)}
+              className="px-3.5 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-xs font-bold text-red-700 border border-red-200 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+              title="Manage Plan & Billing"
+            >
+              <Zap className="w-3.5 h-3.5 text-red-600" />
+              <span>Manage Plan</span>
+            </button>
             <button
               onClick={() => setProfileModalOpen(true)}
               className="px-3.5 py-2 rounded-xl bg-white hover:bg-neutral-50 text-xs font-bold text-neutral-700 hover:text-neutral-900 border border-neutral-200 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
@@ -627,6 +665,59 @@ export const ClientDashboard: React.FC<ClientDashboardProps> = ({ onLogout, init
               className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold uppercase tracking-wider transition-colors shrink-0 shadow-xs cursor-pointer"
             >
               View Plan Details
+            </button>
+          </div>
+        )}
+
+        {/* Scheduled Downgrade Notice Banner */}
+        {pendingDowngradePlanName && (
+          <div className="mb-6 p-4 rounded-3xl bg-blue-50/90 border-2 border-blue-200 flex items-center justify-between gap-4 shadow-sm animate-in fade-in">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                <Clock className="w-4 h-4 text-blue-600" />
+              </div>
+              <div>
+                <h4 className="text-xs font-bold text-blue-900 uppercase tracking-wide">
+                  Scheduled Plan Change: {pendingDowngradePlanName}
+                </h4>
+                <p className="text-xs text-blue-700 mt-0.5">
+                  Takes effect on {downgradeEffectiveAt ? new Date(downgradeEffectiveAt).toLocaleDateString() : 'the next billing cycle'}. Your current coaching tier remains active until then.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setProfileModalOpen(true)}
+              className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase tracking-wider transition-colors shrink-0 shadow-xs cursor-pointer"
+            >
+              Manage
+            </button>
+          </div>
+        )}
+
+        {/* Upcoming Expiry Reminder Banner */}
+        {!isExpired && !isRenewalPending && (isExpiringWithin24h || (billingCycle === 'monthly' && isExpiringWithin3Days)) && (
+          <div className="mb-6 p-4 rounded-3xl bg-amber-500/10 border-2 border-amber-400 flex items-center justify-between gap-4 shadow-sm animate-in fade-in">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5 text-amber-600 animate-pulse" />
+              </div>
+              <div>
+                <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wide">
+                  {isExpiringWithin24h ? 'Subscription Expiring in Less Than 24 Hours' : 'Subscription Expiring Soon (3 Days Remaining)'}
+                </h4>
+                <p className="text-xs text-amber-800 mt-0.5">
+                  Your access to coaching protocols and workout tracking will end on {expiryFormatted}. Renew or upgrade now to prevent any training disruption.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setSelectedRenewalPlanId(user?.activePlanId || 'plan_online_monthly');
+                setShowRenewalPayment(true);
+              }}
+              className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold uppercase tracking-wider transition-colors shrink-0 shadow-xs cursor-pointer"
+            >
+              Renew Now
             </button>
           </div>
         )}

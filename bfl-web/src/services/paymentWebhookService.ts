@@ -28,6 +28,7 @@ import type {
   HistoricalSubscription, 
   SubscriptionStatus 
 } from '../types';
+import { calculatePlanPeriod, determineBillingCycle } from '../utils/planDurationUtils';
 
 // ─── Webhook Event Schema ──────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ export const WebhookEventTypeSchema = z.enum([
   'invoice.payment_failed',
   'customer.subscription.created',
   'customer.subscription.renewed',
+  'customer.subscription.updated',
   'customer.subscription.deleted',
   'customer.subscription.expired',
 ]);
@@ -112,10 +114,18 @@ export async function processPaymentWebhookEvent(
     case 'invoice.payment_succeeded':
     case 'customer.subscription.created':
     case 'customer.subscription.renewed': {
-      // Calculate duration
-      const durationDays = event.durationDays || clientProfile.packageDurationDays || 30;
+      const planName = event.planName || clientProfile.activePlanName || 'Coaching Package';
+      const planPrice = event.planPrice ?? clientProfile.activePlanPrice ?? 0;
+      const planId = event.planId || clientProfile.activePlanId || 'plan_online_monthly';
+
+      // Calculate plan-specific duration & credits
+      const planInfo = calculatePlanPeriod(
+        { id: planId, name: planName, price: planPrice },
+        event.durationDays || clientProfile.packageDurationDays
+      );
       const startDate = nowIso;
-      const expiresAt = new Date(now.getTime() + durationDays * 24 * 60 * 60 * 1000).toISOString();
+      const expiresAt = planInfo.expiresAtIso;
+      const durationDays = planInfo.durationDays;
 
       // Preserve old subscription to history if the client already had an active plan
       const existingHistory: HistoricalSubscription[] =
@@ -131,12 +141,10 @@ export async function processPaymentWebhookEvent(
           endedAt: clientProfile.planExpiresAt || nowIso,
           status: 'expired',
           renewedAt: nowIso,
+          billingCycle: clientProfile.billingCycle || 'monthly',
+          sessionCredits: clientProfile.sessionCredits || 0,
         });
       }
-
-      const planName = event.planName || clientProfile.activePlanName || 'Coaching Package';
-      const planPrice = event.planPrice ?? clientProfile.activePlanPrice ?? 0;
-      const planId = event.planId || clientProfile.activePlanId || 'plan_online_monthly';
 
       // Update client profile to ACTIVE
       await updateUserProfile(event.clientId, {
@@ -146,6 +154,9 @@ export async function processPaymentWebhookEvent(
         activePlanId: planId,
         activePlanName: planName,
         activePlanPrice: planPrice,
+        billingCycle: planInfo.billingCycle,
+        sessionCredits: planInfo.sessionCredits,
+        usedSessionCredits: 0,
         packageStartedAt: startDate,
         planExpiresAt: expiresAt,
         packageDurationDays: durationDays,
@@ -154,6 +165,7 @@ export async function processPaymentWebhookEvent(
         renewalRequestedPlanName: '',
         renewalRequestedPlanPrice: 0,
         renewalRequestedAt: '',
+        remindersSent: [],
         processedEventIds: updatedProcessedIds,
         subscriptionHistory: newHistory,
       } as any);
@@ -214,6 +226,21 @@ export async function processPaymentWebhookEvent(
         status: 'success',
         reason: `Subscription set to past_due for client "${event.clientId}".`,
         resultingSubscriptionStatus: 'past_due',
+      };
+    }
+
+    case 'customer.subscription.updated': {
+      // Handles plan changes or cancellation scheduling
+      await updateUserProfile(event.clientId, {
+        processedEventIds: updatedProcessedIds,
+        updatedAt: nowIso,
+      } as any);
+
+      return {
+        processed: true,
+        status: 'success',
+        reason: `Subscription updated for client "${event.clientId}".`,
+        resultingSubscriptionStatus: clientProfile.subscriptionStatus as SubscriptionStatus,
       };
     }
 

@@ -15,10 +15,30 @@ export const SubscriptionBanner: React.FC<SubscriptionBannerProps> = ({ user, on
 
   const status = getSubscriptionStatus(user);
 
-  // If fully active with no expiration alerts, hide banner
-  if (status === 'active') return null;
+  // Check if active plan is expiring soon (within 3 days)
+  const isExpiringSoon = (() => {
+    if (status !== 'active' || !user.planExpiresAt) return false;
+    const diffMs = new Date(user.planExpiresAt).getTime() - Date.now();
+    return diffMs > 0 && diffMs <= 3 * 24 * 60 * 60 * 1000;
+  })();
+
+  if (status === 'active' && !isExpiringSoon) return null;
 
   const getBannerDetails = () => {
+    if (isExpiringSoon && user.planExpiresAt) {
+      const diffMs = new Date(user.planExpiresAt).getTime() - Date.now();
+      const daysLeft = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+      return {
+        icon: 'time' as const,
+        iconColor: '#D97706',
+        bg: '#FEF3C7',
+        border: '#FDE68A',
+        title: 'Plan Expiring Soon',
+        message: `Your membership expires in ${daysLeft} day${daysLeft > 1 ? 's' : ''} on ${new Date(user.planExpiresAt).toLocaleDateString()}. Renew now to maintain uninterrupted access.`,
+        actionText: 'Renew Subscription',
+      };
+    }
+
     switch (status) {
       case 'past_due':
         return {
@@ -59,9 +79,11 @@ export const SubscriptionBanner: React.FC<SubscriptionBannerProps> = ({ user, on
           iconColor: Colors.error,
           bg: Colors.errorLight,
           border: '#FECACA',
-          title: 'Membership Expired',
-          message: 'Renew your subscription to access workouts, check-ins, and direct coach messaging.',
-          actionText: 'Renew Plan',
+          title: user.billingCycle === 'hourly' ? 'Session Credit Completed' : 'Membership Expired',
+          message: user.billingCycle === 'hourly'
+            ? 'Your 1-on-1 coaching session has been completed. Book another session to continue programming.'
+            : 'Renew your subscription to access workouts, check-ins, and direct coach messaging.',
+          actionText: user.billingCycle === 'hourly' ? 'Book Session' : 'Renew Plan',
         };
     }
   };

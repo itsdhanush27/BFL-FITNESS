@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   CreditCard,
@@ -17,8 +17,9 @@ import { CoachingPlan, TransactionRecord } from '../../types';
 import { 
   createStripeCheckoutSession,
   executeDirectSubscriptionActivation,
-  calculateOneMonthPeriod
+  previewSubscriptionUpgrade
 } from '../../services/stripeService';
+import { calculatePlanPeriod } from '../../utils/planDurationUtils';
 import { downloadReceiptPdf } from '../../services/receiptPdfService';
 
 interface RenewalPaymentModalProps {
@@ -50,10 +51,40 @@ export const RenewalPaymentModal: React.FC<RenewalPaymentModalProps> = ({
   const [paymentSuccess, setPaymentSuccess] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [completedTransaction, setCompletedTransaction] = useState<TransactionRecord | null>(null);
+  const [prorationPreview, setProrationPreview] = useState<{
+    proratedAmount: number;
+    unusedCredit: number;
+  } | null>(null);
+
+  const planPeriod = calculatePlanPeriod(plan);
+  const formattedStart = planPeriod.formattedStart;
+  const formattedEnd = planPeriod.formattedEnd;
+  const durationDays = planPeriod.durationDays;
+
+  // Fetch real-time Stripe proration preview if upgrading
+  useEffect(() => {
+    if (isOpen && isUpgrade && clientId) {
+      previewSubscriptionUpgrade({
+        clientId,
+        currentPlanPrice: 0,
+        newPlanPrice: plan.price,
+        newPlanBillingCycle: planPeriod.billingCycle,
+      })
+        .then(res => {
+          if (res) {
+            setProrationPreview({
+              proratedAmount: res.proratedAmount,
+              unusedCredit: res.unusedCredit
+            });
+          }
+        })
+        .catch((err) => {
+          console.log('[RenewalPaymentModal] Proration preview unavailable:', err.message);
+        });
+    }
+  }, [isOpen, isUpgrade, clientId, plan.id, plan.price, planPeriod.billingCycle]);
 
   if (!isOpen) return null;
-
-  const { formattedStart, formattedEnd } = calculateOneMonthPeriod(30);
 
   /**
    * Official Hosted Stripe Checkout flow (PCI-DSS compliant)
@@ -78,7 +109,7 @@ export const RenewalPaymentModal: React.FC<RenewalPaymentModalProps> = ({
   };
 
   /**
-   * Direct card payment & immediate 1-month activation
+   * Direct card payment & immediate plan-specific activation
    */
   const handleSubmitPayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,14 +130,14 @@ export const RenewalPaymentModal: React.FC<RenewalPaymentModalProps> = ({
         plan,
         cardLast4,
         cardBrand: 'Visa',
-        customDurationDays: 30,
+        customDurationDays: durationDays,
       });
 
       setCompletedTransaction(txRecord);
 
       await onPaymentSuccess({
         cardLast4,
-        amount: plan.price,
+        amount: prorationPreview ? prorationPreview.proratedAmount : plan.price,
         transactionId: txRecord.id,
       });
 
@@ -200,7 +231,7 @@ export const RenewalPaymentModal: React.FC<RenewalPaymentModalProps> = ({
                   </div>
                 </div>
                 <div className="text-[11px] text-neutral-500 flex items-center justify-between pt-1">
-                  <span>Duration: <strong>30 Days (1 Month)</strong></span>
+                  <span>Duration: <strong>{durationDays} Days ({planPeriod.billingCycle === 'hourly' ? `${planPeriod.sessionCredits} Session Credit(s)` : planPeriod.billingCycle.toUpperCase()})</strong></span>
                   <span>Invoice: <strong className="font-mono">{completedTransaction?.invoiceNumber}</strong></span>
                 </div>
               </div>
@@ -235,10 +266,10 @@ export const RenewalPaymentModal: React.FC<RenewalPaymentModalProps> = ({
                     <span>Secure Payment Gateway</span>
                   </div>
                   <h3 className="text-xl sm:text-2xl font-black uppercase font-display tracking-tight">
-                    {isUpgrade ? 'Upgrade Plan & Activate 1 Month' : 'Activate 1-Month Coaching Subscription'}
+                    {isUpgrade ? `Upgrade to ${plan.name}` : `Activate ${plan.name}`}
                   </h3>
                   <p className="text-neutral-400 text-xs">
-                    Secure credit card processing. Your 1-month coaching access activates immediately upon payment.
+                    Secure checkout. Your {planPeriod.billingCycle} coaching access activates immediately upon payment.
                   </p>
                 </div>
               </div>
@@ -260,26 +291,43 @@ export const RenewalPaymentModal: React.FC<RenewalPaymentModalProps> = ({
                   </div>
                   <div className="text-right shrink-0">
                     <span className="text-2xl font-black text-neutral-900 font-mono">${plan.price}</span>
-                    <span className="text-xs text-neutral-500 block">AUD {plan.period || '/ month'}</span>
+                    <span className="text-xs text-neutral-500 block">AUD {plan.period || (planPeriod.billingCycle === 'weekly' ? '/ week' : planPeriod.billingCycle === 'hourly' ? '/ session' : '/ month')}</span>
                   </div>
                 </div>
               </div>
 
-              {/* 1-Month Activation Banner */}
+              {/* Plan Activation Banner */}
               <div className="mx-6 mt-3 p-3 bg-red-50/80 rounded-xl border border-red-200 flex items-center justify-between text-xs text-neutral-700">
                 <div className="flex items-center gap-2">
                   <Calendar className="w-4 h-4 text-red-600 shrink-0" />
                   <div>
-                    <span className="font-bold text-neutral-900 block text-[11px]">1-Month Plan Billing Cycle</span>
+                    <span className="font-bold text-neutral-900 block text-[11px]">
+                      {planPeriod.billingCycle.toUpperCase()} Billing Cycle
+                    </span>
                     <span className="text-[10px] text-neutral-600">
                       Starts: <strong>{formattedStart}</strong> • Expires: <strong className="text-red-700">{formattedEnd}</strong>
                     </span>
                   </div>
                 </div>
                 <span className="px-2 py-0.5 rounded bg-red-100 text-red-800 text-[10px] font-bold">
-                  30 Days
+                  {planPeriod.billingCycle === 'hourly' ? `${planPeriod.sessionCredits} Session Credit(s)` : `${durationDays} Days`}
                 </span>
               </div>
+
+              {/* Proration Preview Banner for Upgrades */}
+              {isUpgrade && prorationPreview && (
+                <div className="mx-6 mt-3 p-3 bg-emerald-50 rounded-xl border border-emerald-300 flex items-center justify-between text-xs text-emerald-900">
+                  <div className="space-y-0.5">
+                    <span className="font-bold block text-[11px]">Stripe Proration Applied</span>
+                    <span className="text-[10px] text-emerald-800">
+                      Unused credit: -${prorationPreview.unusedCredit.toFixed(2)} AUD • Immediate charge:
+                    </span>
+                  </div>
+                  <span className="px-2.5 py-1 rounded bg-emerald-600 text-white font-mono font-bold text-xs">
+                    ${prorationPreview.proratedAmount.toFixed(2)} AUD
+                  </span>
+                </div>
+              )}
 
               {/* Primary: Hosted Checkout Option */}
               <div className="mx-6 mt-4 p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-2.5">
@@ -301,7 +349,7 @@ export const RenewalPaymentModal: React.FC<RenewalPaymentModalProps> = ({
                   className="w-full py-3 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white font-black text-xs uppercase tracking-wider cursor-pointer shadow-md transition-colors flex items-center justify-center gap-2 group"
                 >
                   <Lock className="w-4 h-4 text-emerald-400" />
-                  <span>Proceed to Secure Checkout (${plan.price} AUD)</span>
+                  <span>Proceed to Secure Checkout (${prorationPreview ? prorationPreview.proratedAmount.toFixed(2) : plan.price} AUD)</span>
                   <ExternalLink className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                 </button>
               </div>

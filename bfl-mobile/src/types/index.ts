@@ -4,6 +4,8 @@
  * Source of truth: bfl-web/src/types/index.ts
  */
 
+import type { SubscriptionStatus, HistoricalSubscription } from './subscription';
+
 export type UserRole = 'coach' | 'client' | 'admin';
 
 export interface UserProfile {
@@ -27,6 +29,18 @@ export interface UserProfile {
   packageStartedAt?: string;
   packageDurationDays?: number;
   subscriptionStatus?: SubscriptionStatus;
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
+  usedSessionCredits?: number;
+  remainingSessionCredits?: number;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
+  pendingDowngradePlanId?: string;
+  pendingDowngradePlanName?: string;
+  pendingDowngradePlanPrice?: number;
+  downgradeEffectiveAt?: string;
+  remindersSent?: string[];
   pendingPlanId?: string;
   pendingPlanName?: string;
   pendingPlanPrice?: number;
@@ -278,99 +292,7 @@ export interface IntakeFormData {
   status: 'pending_review' | 'program_created' | 'reviewed' | 'active';
 }
 
-// ─── Subscription Types ────────────────────────────────────────────────────
-
-export const SUBSCRIPTION_STATUSES = ['active', 'past_due', 'expired', 'cancelled', 'pending_approval', 'pending_coach_approval'] as const;
-export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
-
-export interface HistoricalSubscription {
-  planId: string;
-  planName: string;
-  planPrice: number;
-  startedAt: string;
-  endedAt: string;
-  status: SubscriptionStatus;
-  renewedAt?: string;
-}
-
-export interface SubscriptionFields {
-  status?: string;
-  subscriptionStatus?: string;
-  approvalStatus?: string;
-  planExpiresAt?: string;
-  packageStartedAt?: string;
-  cancellationRequestedAt?: string;
-  subscriptionHistory?: HistoricalSubscription[];
-  processedEventIds?: string[];
-}
-
-export interface SubscriptionAccessResult {
-  status: SubscriptionStatus;
-  canReceiveCoaching: boolean;
-  reason: string;
-}
-
-/**
- * Derives the canonical SubscriptionStatus from a client's profile fields.
- * Exact port of bfl-web/src/types/subscription.ts logic.
- */
-export function getSubscriptionStatus(client?: SubscriptionFields | null): SubscriptionStatus {
-  if (!client) return 'expired';
-
-  const subStatus = (client.subscriptionStatus || '').toLowerCase();
-  const status = (client.status || '').toLowerCase();
-
-  if (subStatus === 'past_due' || status === 'past_due') return 'past_due';
-
-  if (client.cancellationRequestedAt) {
-    if (client.planExpiresAt && new Date(client.planExpiresAt).getTime() > Date.now()) {
-      return 'cancelled';
-    }
-    return 'expired';
-  }
-
-  if (subStatus === 'expired' || status === 'expired') return 'expired';
-
-  if (client.planExpiresAt) {
-    const expiresMs = new Date(client.planExpiresAt).getTime();
-    if (!isNaN(expiresMs) && expiresMs <= Date.now()) return 'expired';
-  }
-
-  if (subStatus === 'active' || status === 'active') return 'active';
-
-  if (
-    subStatus === 'pending_coach_approval' ||
-    status === 'pending_coach_approval' ||
-    subStatus === 'pending_approval' ||
-    status === 'pending'
-  ) {
-    return 'pending_coach_approval';
-  }
-
-  return 'expired';
-}
-
-export function canReceiveCoaching(client?: SubscriptionFields | null): boolean {
-  const status = getSubscriptionStatus(client);
-  return status === 'active' || status === 'cancelled' || status === 'past_due';
-}
-
-export function checkSubscriptionAccess(client?: SubscriptionFields | null): SubscriptionAccessResult {
-  const status = getSubscriptionStatus(client);
-  switch (status) {
-    case 'active':
-      return { status, canReceiveCoaching: true, reason: 'Active coaching subscription.' };
-    case 'past_due':
-      return { status, canReceiveCoaching: true, reason: 'Payment past due. Grace period active.' };
-    case 'cancelled':
-      return { status, canReceiveCoaching: true, reason: 'Cancelled but active until end of paid period.' };
-    case 'pending_coach_approval':
-      return { status, canReceiveCoaching: false, reason: 'Awaiting coach approval and program setup.' };
-    case 'expired':
-    default:
-      return { status, canReceiveCoaching: false, reason: 'Plan expired. Renew to access coaching.' };
-  }
-}
+// ─── Transaction Record ───────────────────────────────────────────────────
 
 export interface TransactionRecord {
   id: string;
@@ -394,7 +316,13 @@ export interface TransactionRecord {
   stripePaymentIntentId?: string;
   stripeChargeId?: string;
   stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
   subtotal?: number;
   taxAmount?: number;
 }
+
+// ─── Re-export centralized subscription types ──────────────────────────────
+export * from './subscription';
 

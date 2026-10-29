@@ -19,8 +19,8 @@ import {
   createMobileStripeCheckoutSession,
   verifyAndFulfillMobileCheckoutSession,
   executeMobileStripePayment,
-  calculateOneMonthPeriod,
 } from '../services/stripeService';
+import { calculatePlanPeriod } from '../utils/planDurationUtils';
 
 interface PlanCheckoutModalProps {
   visible: boolean;
@@ -50,7 +50,8 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [verifyingSession, setVerifyingSession] = useState(false);
 
-  const { formattedStart, formattedEnd } = calculateOneMonthPeriod(30);
+  const planInfo = calculatePlanPeriod(plan);
+  const { formattedStart, formattedEnd } = planInfo;
 
   const formatCardNumber = (text: string) => {
     const cleaned = text.replace(/\D/g, '').slice(0, 16);
@@ -199,9 +200,19 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
               <Ionicons name="shield-checkmark" size={14} color="#059669" />
               <Text style={styles.liveBadgeText}>Verified Secure Gateway</Text>
             </View>
-            <Text style={styles.headerTitle}>1-Month Coaching Activation</Text>
+            <Text style={styles.headerTitle}>
+              {planInfo.isHourlySession
+                ? '1-on-1 Coaching Session'
+                : planInfo.billingCycle === 'weekly'
+                ? 'Weekly Coaching Activation'
+                : planInfo.billingCycle === 'custom'
+                ? `${planInfo.durationDays}-Day Custom Program`
+                : '1-Month Coaching Activation'}
+            </Text>
             <Text style={styles.headerDesc}>
-              Complete your payment to activate 30 days of elite programming, biofeedback check-ins & direct coach line.
+              {planInfo.isHourlySession
+                ? 'Complete your payment to activate 1 coaching credit with personal coach supervision.'
+                : `Complete your payment to activate ${planInfo.durationDays} days of elite programming, biofeedback check-ins & direct coach line.`}
             </Text>
           </View>
 
@@ -212,19 +223,29 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
                 {(plan.category || 'online').toUpperCase().replace(/_/g, ' ')}
               </Text>
               <Text style={styles.planName}>{plan.name}</Text>
-              <Text style={styles.planPeriod}>1 Month Access (30 Days)</Text>
+              <Text style={styles.planPeriod}>
+                {planInfo.isHourlySession
+                  ? '1 Session Credit (Valid 30 Days)'
+                  : `${planInfo.durationDays} Days Access`}
+              </Text>
             </View>
             <View style={{ alignItems: 'flex-end' }}>
               <Text style={styles.planPrice}>${plan.price}</Text>
-              <Text style={styles.planCurrency}>AUD / month</Text>
+              <Text style={styles.planCurrency}>
+                AUD {plan.period || (planInfo.billingCycle === 'weekly' ? '/ week' : planInfo.isHourlySession ? '/ session' : '/ month')}
+              </Text>
             </View>
           </View>
 
-          {/* 1-Month Activation Dates Card */}
+          {/* Activation Dates Card */}
           <View style={styles.datesCard}>
             <View style={styles.datesHeader}>
               <Ionicons name="calendar-outline" size={16} color={Colors.primary} />
-              <Text style={styles.datesTitle}>ACTIVATION CYCLE (1 MONTH)</Text>
+              <Text style={styles.datesTitle}>
+                {planInfo.isHourlySession
+                  ? 'SESSION BOOKING WINDOW (30 DAYS)'
+                  : `ACTIVATION CYCLE (${planInfo.durationDays} DAYS)`}
+              </Text>
             </View>
             <View style={styles.datesRow}>
               <View style={styles.dateCol}>

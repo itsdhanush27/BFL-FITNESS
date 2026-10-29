@@ -54,6 +54,7 @@ import {
 } from '../types/subscription';
 import { CompleteSessionPayloadSchema, completedSessionConverter } from '../types/session';
 import { INITIAL_COACHING_PLANS } from '../data/seedData';
+import { calculatePlanPeriod, determineBillingCycle } from '../utils/planDurationUtils';
 
 // ───────────────────────────────────────────────────────────────────────────
 // COLLECTION NAMES
@@ -1699,8 +1700,9 @@ export async function submitPlanUpgradeAndTransaction(
   const txId = `tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const subId = clientId;
 
-  const durationDays = (newPlan.billingCycle as string) === 'annual' || newPlan.period?.includes('yr') ? 365 : newPlan.billingCycle === 'weekly' ? 7 : 30;
-  const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
+  const planInfo = calculatePlanPeriod(newPlan);
+  const durationDays = planInfo.durationDays;
+  const expiresAt = planInfo.expiresAtIso;
   const invoiceNumber = `BFL-INV-${new Date().getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`;
 
   // 1. Log transaction in transactions/{txId}
@@ -1723,6 +1725,8 @@ export async function submitPlanUpgradeAndTransaction(
     billingPeriodStart: requestedAt,
     billingPeriodEnd: expiresAt,
     durationDays,
+    billingCycle: planInfo.billingCycle,
+    sessionCredits: planInfo.sessionCredits,
     subtotal: paymentDetails.amount ?? newPlan.price,
     taxAmount: 0,
   });
@@ -1744,7 +1748,9 @@ export async function submitPlanUpgradeAndTransaction(
     status: 'pending_coach_approval' as const,
     requestedAt,
     paymentReference: txId,
-    planDurationDays: durationDays
+    planDurationDays: durationDays,
+    billingCycle: planInfo.billingCycle,
+    sessionCredits: planInfo.sessionCredits,
   });
   await setDoc(subRef, subData, { merge: true });
 
@@ -1881,12 +1887,11 @@ export async function executeApproveAndInitializeProgramBatch(
     customDurationDays
   });
 
-  const durationDays =
-    customDurationDays ||
-    ((plan.billingCycle as string) === 'annual' || plan.period?.includes('yr') ? 365 : plan.billingCycle === 'weekly' ? 7 : 30);
-  const startedAt = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
-  const fullPlanLabel = `${plan.name} ($${plan.price}${plan.period})`;
+  const planInfo = calculatePlanPeriod(plan, customDurationDays);
+  const durationDays = planInfo.durationDays;
+  const startedAt = planInfo.startedAtIso;
+  const expiresAt = planInfo.expiresAtIso;
+  const fullPlanLabel = `${plan.name} ($${plan.price}${plan.period || ''})`;
   const archiveId = `archive_${clientId}_${Date.now()}`;
 
   const batch = writeBatch(db);
@@ -1918,17 +1923,24 @@ export async function executeApproveAndInitializeProgramBatch(
     activePlanId: plan.id,
     activePlanName: fullPlanLabel,
     activePlanPrice: plan.price,
+    billingCycle: planInfo.billingCycle,
+    sessionCredits: planInfo.sessionCredits,
+    usedSessionCredits: 0,
     packageStartedAt: startedAt,
     planExpiresAt: expiresAt,
     packageDurationDays: durationDays,
     pendingPlanId: null,
     pendingPlanName: null,
     pendingPlanPrice: null,
+    pendingDowngradePlanId: null,
+    pendingDowngradePlanName: null,
+    downgradeEffectiveAt: null,
     renewalRequestedPlanId: null,
     renewalRequestedPlanName: null,
     renewalRequestedPlanPrice: null,
     renewalRequestedAt: null,
     cancellationRequestedAt: null,
+    remindersSent: [],
     updatedAt: startedAt,
   });
   batch.set(userRef, userUpdateData, { merge: true });
@@ -1947,6 +1959,8 @@ export async function executeApproveAndInitializeProgramBatch(
     packageStartedAt: startedAt,
     planExpiresAt: expiresAt,
     planDurationDays: durationDays,
+    billingCycle: planInfo.billingCycle,
+    sessionCredits: planInfo.sessionCredits,
     pendingPlanId: null,
     pendingPlanName: null,
     pendingPlanPrice: null,

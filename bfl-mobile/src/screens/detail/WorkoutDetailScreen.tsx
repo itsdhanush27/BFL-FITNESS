@@ -13,6 +13,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { db, doc, getDoc } from '../../services/firebase';
 import { completeWorkout } from '../../services/firestoreService';
+import { consumeHourlySessionCredit } from '../../services/stripeService';
 import { useAuth } from '../../contexts/AuthContext';
 import { Header } from '../../components/Header';
 import { Card } from '../../components/Card';
@@ -110,6 +111,14 @@ export const WorkoutDetailScreen: React.FC<Props> = ({ route, navigation }) => {
         durationNum,
         exercises
       );
+
+      if (user?.billingCycle === 'hourly') {
+        try {
+          await consumeHourlySessionCredit(user.uid);
+        } catch (creditErr) {
+          console.warn('[WorkoutDetailScreen] Hourly credit consumption notice:', creditErr);
+        }
+      }
 
       Alert.alert('Session Logged!', 'Great work! Your session has been submitted to your coach.', [
         { text: 'Done', onPress: () => navigation.goBack() },

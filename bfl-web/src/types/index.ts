@@ -36,6 +36,18 @@ export interface ClientRosterItem {
   activePlanId?: string;
   activePlanName?: string;
   activePlanPrice?: number;
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
+  usedSessionCredits?: number;
+  remainingSessionCredits?: number;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
+  pendingDowngradePlanId?: string;
+  pendingDowngradePlanName?: string;
+  pendingDowngradePlanPrice?: number;
+  downgradeEffectiveAt?: string;
+  remindersSent?: string[];
   waistCm?: number;
   chestCm?: number;
   bicepsCm?: number;
@@ -77,6 +89,18 @@ export interface UserProfile {
   cancellationRequestedAt?: string;
   subscriptionHistory?: import('./subscription').HistoricalSubscription[];
   processedEventIds?: string[];
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
+  usedSessionCredits?: number;
+  remainingSessionCredits?: number;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
+  pendingDowngradePlanId?: string;
+  pendingDowngradePlanName?: string;
+  pendingDowngradePlanPrice?: number;
+  downgradeEffectiveAt?: string;
+  remindersSent?: string[];
   waistCm?: number;
   chestCm?: number;
   bicepsCm?: number;
@@ -436,6 +460,17 @@ export interface SubscriptionDocument {
   planDurationDays?: number;
   planExpiresAt?: string;
   packageStartedAt?: string;
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
+  usedSessionCredits?: number;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
+  pendingDowngradePlanId?: string;
+  pendingDowngradePlanName?: string;
+  pendingDowngradePlanPrice?: number;
+  downgradeEffectiveAt?: string;
+  remindersSent?: string[];
 }
 
 export interface TransactionRecord {
@@ -460,6 +495,9 @@ export interface TransactionRecord {
   stripePaymentIntentId?: string;
   stripeChargeId?: string;
   stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
   subtotal?: number;
   taxAmount?: number;
 }

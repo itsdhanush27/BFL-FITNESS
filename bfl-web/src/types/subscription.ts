@@ -53,6 +53,9 @@ export interface HistoricalSubscription {
   endedAt: string;
   status: SubscriptionStatus;
   renewedAt?: string;
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
+  stripeSubscriptionId?: string;
 }
 
 /**
@@ -65,9 +68,22 @@ export interface SubscriptionFields {
   approvalStatus?: string;
   planExpiresAt?: string;
   packageStartedAt?: string;
+  packageDurationDays?: number;
   cancellationRequestedAt?: string;
   subscriptionHistory?: HistoricalSubscription[];
   processedEventIds?: string[];
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
+  usedSessionCredits?: number;
+  remainingSessionCredits?: number;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
+  pendingDowngradePlanId?: string;
+  pendingDowngradePlanName?: string;
+  pendingDowngradePlanPrice?: number;
+  downgradeEffectiveAt?: string;
+  remindersSent?: string[];
 }
 
 // ─── Core Derivation Function ──────────────────────────────────────────────
@@ -79,10 +95,11 @@ export interface SubscriptionFields {
  * 1. Explicit `subscriptionStatus` or `status` === 'past_due'
  * 2. Explicit cancellation flag → 'cancelled' (still active until end date)
  * 3. Explicit 'expired' on either status field
- * 4. `planExpiresAt` in the past → 'expired'
- * 5. Explicit 'active' or approved status → 'active'
- * 6. Pending coach approval states → 'pending_coach_approval' (not yet active for new coaching)
- * 7. Default → 'expired' (fail-safe: no proof of active = no coaching)
+ * 4. Hourly session package: check remaining session credits & booking window
+ * 5. `planExpiresAt` in the past → 'expired'
+ * 6. Explicit 'active' or approved status → 'active'
+ * 7. Pending coach approval states → 'pending_coach_approval' (not yet active for new coaching)
+ * 8. Default → 'expired' (fail-safe: no proof of active = no coaching)
  */
 export function getSubscriptionStatus(client?: SubscriptionFields | null): SubscriptionStatus {
   if (!client) return 'expired';
@@ -108,7 +125,16 @@ export function getSubscriptionStatus(client?: SubscriptionFields | null): Subsc
     return 'expired';
   }
 
-  // 4. Plan expiration date has passed
+  // 4. Hourly session credits: If hourly plan and session credits are 0 or less
+  if (client.billingCycle === 'hourly' && typeof client.sessionCredits === 'number') {
+    const used = client.usedSessionCredits || 0;
+    const remaining = client.sessionCredits - used;
+    if (remaining <= 0) {
+      return 'expired';
+    }
+  }
+
+  // 5. Plan expiration date has passed
   if (client.planExpiresAt) {
     const expiresMs = new Date(client.planExpiresAt).getTime();
     if (!isNaN(expiresMs) && expiresMs <= Date.now()) {
@@ -116,12 +142,12 @@ export function getSubscriptionStatus(client?: SubscriptionFields | null): Subsc
     }
   }
 
-  // 5. Explicitly active
+  // 6. Explicitly active
   if (subStatus === 'active' || status === 'active') {
     return 'active';
   }
 
-  // 6. Pending coach approval — payment confirmed, awaiting coach routine initialization
+  // 7. Pending coach approval — payment confirmed, awaiting coach routine initialization
   if (
     subStatus === 'pending_coach_approval' ||
     status === 'pending_coach_approval' ||
@@ -131,7 +157,7 @@ export function getSubscriptionStatus(client?: SubscriptionFields | null): Subsc
     return 'pending_coach_approval';
   }
 
-  // 7. Fail-safe default
+  // 8. Fail-safe default
   return 'expired';
 }
 

@@ -159,9 +159,9 @@ export const ProfileScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* Subscription & 1-Month Plan Activation Card */}
+        {/* Subscription & Plan Activation Card */}
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>MEMBERSHIP & 1-MONTH ACTIVATION</Text>
+          <Text style={styles.sectionTitle}>MEMBERSHIP & SUBSCRIPTION</Text>
         </View>
 
         <Card style={styles.membershipCard}>
@@ -173,11 +173,19 @@ export const ProfileScreen: React.FC = () => {
             <Badge label={subStatus.toUpperCase()} variant={getStatusBadgeVariant()} />
           </View>
 
-          {/* 1-Month Start & End Dates Display */}
+          {/* Plan Start & End Dates Display */}
           <View style={styles.periodBox}>
             <View style={styles.periodHeader}>
               <Ionicons name="calendar" size={14} color={Colors.primary} />
-              <Text style={styles.periodHeaderText}>1-MONTH BILLING CYCLE</Text>
+              <Text style={styles.periodHeaderText}>
+                {user?.billingCycle === 'hourly'
+                  ? '1-ON-1 COACHING SESSION'
+                  : user?.billingCycle === 'weekly'
+                  ? 'WEEKLY BILLING CYCLE (7 DAYS)'
+                  : user?.billingCycle === 'custom'
+                  ? `CUSTOM DURATION (${user?.packageDurationDays || 30} DAYS)`
+                  : 'MONTHLY BILLING CYCLE'}
+              </Text>
             </View>
             <View style={styles.datesGrid}>
               <View style={styles.dateCol}>
@@ -189,13 +197,21 @@ export const ProfileScreen: React.FC = () => {
               <View style={styles.dateCol}>
                 <Text style={styles.dateLabel}>EXPIRATION DATE</Text>
                 <Text style={[styles.dateValue, { color: Colors.primary }]}>
-                  {user?.planExpiresAt ? formatDate(user.planExpiresAt) : '30 Days from Start'}
+                  {user?.planExpiresAt ? formatDate(user.planExpiresAt) : 'Active Period'}
                 </Text>
               </View>
             </View>
-            <Text style={styles.daysRemainingText}>
-              {subStatus === 'expired' ? 'Plan has expired' : `${daysLeft} Days Remaining in Current Month`}
-            </Text>
+            {user?.billingCycle === 'hourly' ? (
+              <Text style={styles.daysRemainingText}>
+                {subStatus === 'expired'
+                  ? 'Session credit used — book next session to continue'
+                  : `${Math.max(0, (user?.sessionCredits || 1) - (user?.usedSessionCredits || 0))} Session Credit Remaining (${daysLeft} days left in booking window)`}
+              </Text>
+            ) : (
+              <Text style={styles.daysRemainingText}>
+                {subStatus === 'expired' ? 'Plan has expired' : `${daysLeft} Days Remaining in Current Cycle`}
+              </Text>
+            )}
           </View>
 
           {/* Renew / Upgrade Button */}

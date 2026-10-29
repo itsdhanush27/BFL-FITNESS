@@ -3,13 +3,15 @@
  * ---------------------------------------------------------------------------
  * Official Stripe Integration Service for BFL Fitness.
  *
- * Uses official Stripe Checkout Sessions for PCI-DSS compliance:
- *   • Creates hosted Stripe Checkout Sessions (no raw card data on client)
- *   • Verifies session completion and retrieves payment status
- *   • Activates exact 1-Month coaching subscriptions (30 days)
- *   • Stores official TransactionRecord documents in Firestore
- *   • Preserves non-destructive subscriptionHistory
- *   • Generates PDF tax receipts & invoices
+ * Provides:
+ *   • Plan-Specific Expiration Calculation (Hourly, Weekly, Monthly, Custom)
+ *   • Hosted Stripe Checkout Sessions (PCI-DSS compliant)
+ *   • Subscription Upgrades with Proration Previews
+ *   • Scheduled Downgrades (retaining paid access until period end)
+ *   • Cancellations (at period end) & Reactivations
+ *   • Session Credit Tracking for Hourly Plans
+ *   • Official TransactionRecord documents in Firestore
+ *   • Non-destructive Historical Subscriptions preservation
  * ---------------------------------------------------------------------------
  */
 
@@ -30,6 +32,7 @@ import {
   saveNotificationToFirestore 
 } from './firestoreService';
 import { CoachingPlan, TransactionRecord, HistoricalSubscription } from '../types';
+import { calculatePlanPeriod, determineBillingCycle, PlanDurationInfo } from '../utils/planDurationUtils';
 
 // Backend API base URL for server-side Stripe operations (never keep secret keys on client)
 const BACKEND_API_BASE =
@@ -37,7 +40,51 @@ const BACKEND_API_BASE =
   (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
 /**
- * Calculates exact 1-month (30 calendar days) billing cycle start and end dates
+ * Safely fetches JSON from the backend API, preventing "Unexpected end of JSON input"
+ * and providing actionable diagnostics on 404, 500, or non-JSON responses.
+ */
+async function safeFetchJson<T>(url: string, options: RequestInit): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(url, options);
+  } catch (netErr: any) {
+    throw new Error(
+      `Cannot connect to backend API server at ${url}. Please verify the server is running. (${netErr.message})`
+    );
+  }
+
+  const text = await res.text();
+  let json: any = null;
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // Body is not valid JSON (e.g. HTML 404 page or empty response)
+    }
+  }
+
+  if (!res.ok) {
+    const errorMsg =
+      json?.error ||
+      json?.message ||
+      (res.status === 404
+        ? `API endpoint not found: ${url} (HTTP 404). Please ensure the backend server is running (npm run server) or configure VITE_API_URL in your .env file.`
+        : `Backend server error (${res.status} ${res.statusText}): ${text ? text.slice(0, 200) : 'Empty response'}`);
+    throw new Error(errorMsg);
+  }
+
+  if (json === null) {
+    throw new Error(
+      `Backend server returned an empty or non-JSON response from ${url} (HTTP ${res.status}).`
+    );
+  }
+
+  return json as T;
+}
+
+/**
+ * Calculates plan period based on actual billing cycle and configured duration.
+ * Maintained with calculateOneMonthPeriod alias for backward compatibility.
  */
 export function calculateOneMonthPeriod(durationDays: number = 30) {
   const startDate = new Date();
@@ -65,20 +112,21 @@ export interface CreateCheckoutSessionParams {
   clientName: string;
   clientEmail: string;
   plan: CoachingPlan;
+  customDurationDays?: number;
   returnUrl?: string;
   cancelUrl?: string;
 }
 
 /**
- * Creates an official Stripe Checkout Session for PCI-DSS compliant payment
+ * Creates an official Stripe Checkout Session with accurate plan duration & billing cycle
  */
 export async function createStripeCheckoutSession(params: CreateCheckoutSessionParams): Promise<{
   sessionId: string;
   url: string;
   invoiceNumber: string;
 }> {
-  const { clientId, clientName, clientEmail, plan } = params;
-  const { startedAtIso, expiresAtIso, formattedStart, formattedEnd } = calculateOneMonthPeriod(30);
+  const { clientId, clientName, clientEmail, plan, customDurationDays } = params;
+  const planInfo = calculatePlanPeriod(plan, customDurationDays);
   const invoiceNumber = generateInvoiceNumber();
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
@@ -87,7 +135,11 @@ export async function createStripeCheckoutSession(params: CreateCheckoutSessionP
 
   const amountInCents = Math.round(plan.price * 100);
 
-  const res = await fetch(`${BACKEND_API_BASE}/api/stripe/create-checkout-session`, {
+  const session = await safeFetchJson<{
+    sessionId: string;
+    url: string;
+    invoiceNumber?: string;
+  }>(`${BACKEND_API_BASE}/api/stripe/create-checkout-session`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -100,19 +152,16 @@ export async function createStripeCheckoutSession(params: CreateCheckoutSessionP
       planName: plan.name,
       amountInCents,
       invoiceNumber,
-      startDate: startedAtIso,
-      endDate: expiresAtIso,
-      formattedStart,
-      formattedEnd,
+      billingCycle: planInfo.billingCycle,
+      customDurationDays,
+      startDate: planInfo.startedAtIso,
+      endDate: planInfo.expiresAtIso,
+      formattedStart: planInfo.formattedStart,
+      formattedEnd: planInfo.formattedEnd,
       successUrl,
       cancelUrl,
     }),
   });
-
-  const session = await res.json();
-  if (!res.ok || session.error) {
-    throw new Error(session.error || session.message || 'Failed to initialize secure checkout session.');
-  }
 
   return {
     sessionId: session.sessionId,
@@ -128,17 +177,12 @@ export async function verifyAndFulfillCheckoutSession(
   sessionId: string,
   fallbackPlan?: CoachingPlan
 ): Promise<TransactionRecord> {
-  const res = await fetch(`${BACKEND_API_BASE}/api/stripe/checkout-session/${sessionId}`, {
+  const session = await safeFetchJson<any>(`${BACKEND_API_BASE}/api/stripe/checkout-session/${sessionId}`, {
     method: 'GET',
     headers: {
       'Content-Type': 'application/json',
     },
   });
-
-  const session = await res.json();
-  if (!res.ok || session.error) {
-    throw new Error(session.error || session.message || 'Could not verify checkout session.');
-  }
 
   const metadata = session.metadata || {};
   const clientId = metadata.clientId || 'client_user';
@@ -150,9 +194,13 @@ export async function verifyAndFulfillCheckoutSession(
   const currency = (session.currency || 'AUD').toUpperCase();
   const invoiceNumber = metadata.invoiceNumber || generateInvoiceNumber();
 
-  const { startedAtIso, expiresAtIso } = calculateOneMonthPeriod(30);
-  const startedAt = metadata.startDate || startedAtIso;
-  const expiresAt = metadata.endDate || expiresAtIso;
+  // Calculate actual plan period based on plan type
+  const planInfo = calculatePlanPeriod(planId);
+  const startedAt = metadata.startDate || planInfo.startedAtIso;
+  const expiresAt = metadata.endDate || planInfo.expiresAtIso;
+  const durationDays = metadata.durationDays ? Number(metadata.durationDays) : planInfo.durationDays;
+  const billingCycle = metadata.billingCycle || planInfo.billingCycle;
+  const sessionCredits = metadata.sessionCredits ? Number(metadata.sessionCredits) : planInfo.sessionCredits;
 
   const transactionRecord: TransactionRecord = {
     id: session.id,
@@ -171,8 +219,12 @@ export async function verifyAndFulfillCheckoutSession(
     invoiceNumber,
     billingPeriodStart: startedAt,
     billingPeriodEnd: expiresAt,
-    durationDays: 30,
+    durationDays,
+    billingCycle,
+    sessionCredits,
     stripePaymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : session.id,
+    stripeCustomerId: typeof session.customer === 'string' ? session.customer : undefined,
+    stripeSubscriptionId: typeof session.subscription === 'string' ? session.subscription : undefined,
     subtotal: amount,
     taxAmount: 0,
   };
@@ -181,7 +233,7 @@ export async function verifyAndFulfillCheckoutSession(
   try {
     await setDoc(doc(db, 'transactions', session.id), transactionRecord);
   } catch (err: any) {
-    console.warn('[stripeService] Firestore transaction write notice (rules pending):', err?.message);
+    console.warn('[stripeService] Firestore transaction write notice:', err?.message);
   }
   try {
     const localKey = `bfl_transactions_${clientId}`;
@@ -189,7 +241,7 @@ export async function verifyAndFulfillCheckoutSession(
     localStorage.setItem(localKey, JSON.stringify([transactionRecord, ...existing.filter((t: any) => t.id !== transactionRecord.id)]));
   } catch {}
 
-  // 2. Activate 1-month plan on user document
+  // 2. Activate plan on user document
   let clientProfile: any = null;
   try {
     clientProfile = await getUserProfile(clientId);
@@ -205,10 +257,12 @@ export async function verifyAndFulfillCheckoutSession(
         endedAt: clientProfile.planExpiresAt || startedAt,
         status: 'expired',
         renewedAt: startedAt,
+        billingCycle: clientProfile.billingCycle || 'monthly',
+        sessionCredits: clientProfile.sessionCredits || 0,
       });
     }
 
-    const fullPlanLabel = `${planName} ($${amount}/month)`;
+    const fullPlanLabel = `${planName} ($${amount})`;
 
     await updateUserProfile(clientId, {
       status: 'active',
@@ -217,9 +271,14 @@ export async function verifyAndFulfillCheckoutSession(
       activePlanId: planId,
       activePlanName: fullPlanLabel,
       activePlanPrice: amount,
+      billingCycle,
+      sessionCredits,
+      usedSessionCredits: 0,
       packageStartedAt: startedAt,
       planExpiresAt: expiresAt,
-      packageDurationDays: 30,
+      packageDurationDays: durationDays,
+      stripeCustomerId: typeof session.customer === 'string' ? session.customer : undefined,
+      stripeSubscriptionId: typeof session.subscription === 'string' ? session.subscription : undefined,
       pendingPlanId: '',
       pendingPlanName: '',
       pendingPlanPrice: 0,
@@ -228,20 +287,11 @@ export async function verifyAndFulfillCheckoutSession(
       renewalRequestedPlanPrice: 0,
       renewalRequestedAt: '',
       cancellationRequestedAt: '',
+      remindersSent: [],
       subscriptionHistory: newHistory,
     } as any);
   } catch (err: any) {
-    console.warn('[stripeService] Firestore user profile update notice (rules pending):', err?.message);
-    try {
-      await updateUserProfile(clientId, {
-        activePlanId: planId,
-        activePlanName: `${planName} ($${amount}/month)`,
-        activePlanPrice: amount,
-        packageStartedAt: startedAt,
-        planExpiresAt: expiresAt,
-        packageDurationDays: 30,
-      } as any);
-    } catch {}
+    console.warn('[stripeService] Firestore user profile update notice:', err?.message);
   }
 
   // 3. Save notifications
@@ -250,7 +300,7 @@ export async function verifyAndFulfillCheckoutSession(
     userId: coachId,
     recipientRole: 'coach',
     title: 'Plan Activated',
-    message: `${clientName} paid $${amount} ${currency} for ${planName}. 1-Month coaching activated. Invoice: ${invoiceNumber}.`,
+    message: `${clientName} paid $${amount} ${currency} for ${planName}. Active until ${new Date(expiresAt).toLocaleDateString()}. Invoice: ${invoiceNumber}.`,
     type: 'system',
     actionTab: 'clients',
     timestamp: startedAt,
@@ -263,7 +313,7 @@ export async function verifyAndFulfillCheckoutSession(
     userId: clientId,
     recipientRole: 'client',
     title: 'Subscription Active & Payment Confirmed',
-    message: `Your payment of $${amount} for ${planName} was successful. Your 1-month training period is active.`,
+    message: `Your payment of $${amount} for ${planName} was successful. Active until ${new Date(expiresAt).toLocaleDateString()}.`,
     type: 'system',
     actionTab: 'profile',
     timestamp: startedAt,
@@ -277,7 +327,7 @@ export async function verifyAndFulfillCheckoutSession(
 
 /**
  * Direct Subscription Activation helper:
- * Activates 1-month cycle, writes transaction record, and updates client
+ * Activates plan with accurate plan duration, session credits, and historical preservation
  */
 export async function executeDirectSubscriptionActivation(params: {
   clientId: string;
@@ -297,11 +347,10 @@ export async function executeDirectSubscriptionActivation(params: {
     cardLast4 = '4242',
     cardBrand = 'Visa',
     assignedCoachId = 'admin_mass_narimanian',
-    customDurationDays = 30,
+    customDurationDays,
   } = params;
 
-  const durationDays = customDurationDays || 30;
-  const { startedAtIso, expiresAtIso, formattedStart, formattedEnd } = calculateOneMonthPeriod(durationDays);
+  const planInfo = calculatePlanPeriod(plan, customDurationDays);
   const invoiceNumber = generateInvoiceNumber();
   const txId = `tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const currency = 'AUD';
@@ -317,13 +366,15 @@ export async function executeDirectSubscriptionActivation(params: {
     currency,
     status: 'succeeded',
     paymentMethod: `Credit Card (${cardBrand})`,
-    createdAt: startedAtIso,
+    createdAt: planInfo.startedAtIso,
     cardLast4,
     cardBrand,
     invoiceNumber,
-    billingPeriodStart: startedAtIso,
-    billingPeriodEnd: expiresAtIso,
-    durationDays,
+    billingPeriodStart: planInfo.startedAtIso,
+    billingPeriodEnd: planInfo.expiresAtIso,
+    durationDays: planInfo.durationDays,
+    billingCycle: planInfo.billingCycle,
+    sessionCredits: planInfo.sessionCredits,
     subtotal: plan.price,
     taxAmount: 0,
   };
@@ -332,7 +383,7 @@ export async function executeDirectSubscriptionActivation(params: {
   try {
     await setDoc(doc(db, 'transactions', txId), transactionRecord);
   } catch (err: any) {
-    console.warn('[stripeService] Firestore transaction write notice (rules pending):', err?.message);
+    console.warn('[stripeService] Firestore transaction write notice:', err?.message);
   }
   try {
     const localKey = `bfl_transactions_${clientId}`;
@@ -340,7 +391,7 @@ export async function executeDirectSubscriptionActivation(params: {
     localStorage.setItem(localKey, JSON.stringify([transactionRecord, ...existing.filter((t: any) => t.id !== transactionRecord.id)]));
   } catch {}
 
-  // 2. Update client user document with 1-month plan
+  // 2. Update client user document with correct duration & credits
   try {
     const clientProfile = await getUserProfile(clientId);
     const existingHistory: HistoricalSubscription[] = (clientProfile as any)?.subscriptionHistory || [];
@@ -352,13 +403,15 @@ export async function executeDirectSubscriptionActivation(params: {
         planName: clientProfile.activePlanName || clientProfile.activePlanId,
         planPrice: clientProfile.activePlanPrice || 0,
         startedAt: clientProfile.packageStartedAt,
-        endedAt: clientProfile.planExpiresAt || startedAtIso,
+        endedAt: clientProfile.planExpiresAt || planInfo.startedAtIso,
         status: 'expired',
-        renewedAt: startedAtIso,
+        renewedAt: planInfo.startedAtIso,
+        billingCycle: clientProfile.billingCycle || 'monthly',
+        sessionCredits: clientProfile.sessionCredits || 0,
       });
     }
 
-    const fullPlanLabel = `${plan.name} ($${plan.price}${plan.period || '/ month'})`;
+    const fullPlanLabel = `${plan.name} ($${plan.price}${plan.period || ''})`;
 
     await updateUserProfile(clientId, {
       status: 'active',
@@ -367,9 +420,12 @@ export async function executeDirectSubscriptionActivation(params: {
       activePlanId: plan.id,
       activePlanName: fullPlanLabel,
       activePlanPrice: plan.price,
-      packageStartedAt: startedAtIso,
-      planExpiresAt: expiresAtIso,
-      packageDurationDays: durationDays,
+      billingCycle: planInfo.billingCycle,
+      sessionCredits: planInfo.sessionCredits,
+      usedSessionCredits: 0,
+      packageStartedAt: planInfo.startedAtIso,
+      planExpiresAt: planInfo.expiresAtIso,
+      packageDurationDays: planInfo.durationDays,
       pendingPlanId: '',
       pendingPlanName: '',
       pendingPlanPrice: 0,
@@ -378,20 +434,11 @@ export async function executeDirectSubscriptionActivation(params: {
       renewalRequestedPlanPrice: 0,
       renewalRequestedAt: '',
       cancellationRequestedAt: '',
+      remindersSent: [],
       subscriptionHistory: newHistory,
     } as any);
   } catch (err: any) {
-    console.warn('[stripeService] Firestore user profile update notice (rules pending):', err?.message);
-    try {
-      await updateUserProfile(clientId, {
-        activePlanId: plan.id,
-        activePlanName: `${plan.name} ($${plan.price}${plan.period || '/ month'})`,
-        activePlanPrice: plan.price,
-        packageStartedAt: startedAtIso,
-        planExpiresAt: expiresAtIso,
-        packageDurationDays: durationDays,
-      } as any);
-    } catch {}
+    console.warn('[stripeService] Firestore user profile update notice:', err?.message);
   }
 
   // 3. Notifications
@@ -399,10 +446,10 @@ export async function executeDirectSubscriptionActivation(params: {
     userId: assignedCoachId,
     recipientRole: 'coach',
     title: 'Plan Activated',
-    message: `${clientName} paid $${plan.price} ${currency} for ${plan.name}. 1-Month access active (${formattedStart} – ${formattedEnd}). Invoice: ${invoiceNumber}.`,
+    message: `${clientName} paid $${plan.price} ${currency} for ${plan.name}. Access active until ${planInfo.formattedEnd}. Invoice: ${invoiceNumber}.`,
     type: 'system',
     actionTab: 'clients',
-    timestamp: startedAtIso,
+    timestamp: planInfo.startedAtIso,
     read: false,
     actorName: clientName,
     actorRole: 'client',
@@ -412,16 +459,141 @@ export async function executeDirectSubscriptionActivation(params: {
     userId: clientId,
     recipientRole: 'client',
     title: 'Subscription Active & Payment Confirmed',
-    message: `Your payment of $${plan.price} for ${plan.name} was successful. Active until ${formattedEnd}.`,
+    message: `Your payment of $${plan.price} for ${plan.name} was successful. Active until ${planInfo.formattedEnd}.`,
     type: 'system',
     actionTab: 'profile',
-    timestamp: startedAtIso,
+    timestamp: planInfo.startedAtIso,
     read: false,
     actorName: 'BFL Billing',
     actorRole: 'system',
   }).catch(() => {});
 
   return transactionRecord;
+}
+
+/**
+ * Previews an upgrade with proration calculation
+ */
+export async function previewSubscriptionUpgrade(params: {
+  clientId: string;
+  currentPlanPrice: number;
+  newPlanPrice: number;
+  currentPlanBillingCycle?: string;
+  newPlanBillingCycle?: string;
+  planExpiresAt?: string;
+}): Promise<{
+  currentPrice: number;
+  newPrice: number;
+  unusedCredit: number;
+  proratedAmount: number;
+  isUpgrade: boolean;
+  isDowngrade: boolean;
+  effectiveImmediate: boolean;
+  effectiveAtPeriodEnd: boolean;
+}> {
+  return await safeFetchJson<{
+    currentPrice: number;
+    newPrice: number;
+    unusedCredit: number;
+    proratedAmount: number;
+    isUpgrade: boolean;
+    isDowngrade: boolean;
+    effectiveImmediate: boolean;
+    effectiveAtPeriodEnd: boolean;
+  }>(`${BACKEND_API_BASE}/api/stripe/preview-upgrade`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+}
+
+/**
+ * Executes a plan upgrade via backend API
+ */
+export async function executeSubscriptionUpgrade(params: {
+  clientId: string;
+  newPlan: CoachingPlan;
+  paymentDetails?: { cardLast4?: string; cardBrand?: string; amount?: number };
+}): Promise<{ success: boolean; planInfo: PlanDurationInfo; transaction: TransactionRecord }> {
+  return await safeFetchJson<{ success: boolean; planInfo: PlanDurationInfo; transaction: TransactionRecord }>(
+    `${BACKEND_API_BASE}/api/stripe/upgrade-subscription`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    }
+  );
+}
+
+/**
+ * Schedules a plan downgrade (takes effect at current period end)
+ */
+export async function executeSubscriptionDowngrade(params: {
+  clientId: string;
+  targetPlan: CoachingPlan;
+}): Promise<{ success: boolean; effectiveAt: string }> {
+  return await safeFetchJson<{ success: boolean; effectiveAt: string }>(
+    `${BACKEND_API_BASE}/api/stripe/downgrade-subscription`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    }
+  );
+}
+
+/**
+ * Cancels client subscription (retains access until period end)
+ */
+export async function cancelClientSubscription(clientId: string, reason?: string): Promise<{
+  success: boolean;
+  message: string;
+  expiresAt?: string;
+}> {
+  return await safeFetchJson<{ success: boolean; message: string; expiresAt?: string }>(
+    `${BACKEND_API_BASE}/api/stripe/cancel-subscription`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId, reason }),
+    }
+  );
+}
+
+/**
+ * Reactivates a cancelled subscription
+ */
+export async function reactivateClientSubscription(clientId: string): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  return await safeFetchJson<{ success: boolean; message: string }>(
+    `${BACKEND_API_BASE}/api/stripe/reactivate-subscription`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId }),
+    }
+  );
+}
+
+/**
+ * Consumes 1 session credit for an hourly coaching plan
+ */
+export async function consumeHourlySessionCredit(clientId: string): Promise<number> {
+  const profile = await getUserProfile(clientId);
+  if (!profile) throw new Error('Client profile not found');
+
+  const total = profile.sessionCredits || 0;
+  const used = (profile.usedSessionCredits || 0) + 1;
+  const remaining = Math.max(0, total - used);
+
+  await updateUserProfile(clientId, {
+    usedSessionCredits: used,
+    subscriptionStatus: remaining > 0 ? 'active' : 'expired',
+  } as any);
+
+  return remaining;
 }
 
 /**

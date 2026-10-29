@@ -76,6 +76,7 @@ import {
   SubscriptionExpiredError,
 } from '../types/subscription';
 import type { SubscriptionStatus, SubscriptionAccessResult, SubscriptionFields } from '../types/subscription';
+import { calculatePlanPeriod, determineBillingCycle } from '../utils/planDurationUtils';
 
 // Re-export centralized subscription functions for consumers
 export { getSubscriptionStatus, canReceiveCoaching, checkSubscriptionAccess, SubscriptionExpiredError };
@@ -84,17 +85,7 @@ export type { SubscriptionStatus, SubscriptionAccessResult, SubscriptionFields }
 /** Helper to calculate package duration in days based on billing period */
 export const getPlanDurationDays = (planOrPeriod?: string | { period?: string; billingCycle?: string; id?: string; name?: string }): number => {
   if (!planOrPeriod) return 30;
-  let str = '';
-  if (typeof planOrPeriod === 'string') {
-    str = planOrPeriod.toLowerCase();
-  } else {
-    str = `${planOrPeriod.id || ''} ${planOrPeriod.name || ''} ${planOrPeriod.period || ''} ${planOrPeriod.billingCycle || ''}`.toLowerCase();
-  }
-  if (str.includes('week') || str.includes('7')) return 7;
-  if (str.includes('month') || str.includes('30')) return 30;
-  // Hourly and single-session coaching packages provide a standard 30-day coaching and booking window
-  if (str.includes('hour') || str.includes('session')) return 30;
-  return 30;
+  return calculatePlanPeriod(planOrPeriod as any).durationDays;
 };
 
 /**
@@ -1894,10 +1885,11 @@ export const FitnessDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
       INITIAL_COACHING_PLANS.find(p => p.id === resolvedPlanId || p.name?.toLowerCase() === resolvedPlanId?.toLowerCase()) ||
       coachingPlans[0];
 
-    const durationDays = customDurationDays || getPlanDurationDays(plan);
-    const startedAt = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
-    const fullPlanLabel = `${plan.name} ($${plan.price}${plan.period})`;
+    const planInfo = calculatePlanPeriod(plan, customDurationDays);
+    const durationDays = planInfo.durationDays;
+    const startedAt = planInfo.startedAtIso;
+    const expiresAt = planInfo.expiresAtIso;
+    const fullPlanLabel = `${plan.name} ($${plan.price}${plan.period || ''})`;
 
     // Preserve previous subscription in subscriptionHistory array
     const prevHistory = targetClient?.subscriptionHistory || [];
@@ -1911,6 +1903,8 @@ export const FitnessDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
         endedAt: targetClient.planExpiresAt || startedAt,
         status: 'expired',
         renewedAt: startedAt,
+        billingCycle: targetClient.billingCycle || 'monthly',
+        sessionCredits: targetClient.sessionCredits || 0,
       });
     }
 
@@ -1920,6 +1914,9 @@ export const FitnessDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
         activePlanId: plan.id,
         activePlanName: fullPlanLabel,
         activePlanPrice: plan.price,
+        billingCycle: planInfo.billingCycle,
+        sessionCredits: planInfo.sessionCredits,
+        usedSessionCredits: 0,
         status: 'active',
         subscriptionStatus: 'active',
         approvalStatus: 'approved',
@@ -1936,6 +1933,7 @@ export const FitnessDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
         renewalRequestedPlanPrice: 0,
         renewalRequestedAt: '',
         cancellationRequestedAt: '',
+        remindersSent: [],
         subscriptionHistory: updatedHistory,
       });
     } catch (err) {
@@ -1967,6 +1965,9 @@ export const FitnessDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
             activePlanId: plan.id,
             activePlanName: fullPlanLabel,
             activePlanPrice: plan.price,
+            billingCycle: planInfo.billingCycle,
+            sessionCredits: planInfo.sessionCredits,
+            usedSessionCredits: 0,
             packageStartedAt: startedAt,
             planExpiresAt: expiresAt,
             packageDurationDays: durationDays,
@@ -2018,6 +2019,9 @@ export const FitnessDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
         activePlanId: plan.id,
         activePlanName: fullPlanLabel,
         activePlanPrice: plan.price,
+        billingCycle: planInfo.billingCycle,
+        sessionCredits: planInfo.sessionCredits,
+        usedSessionCredits: 0,
         packageStartedAt: startedAt,
         planExpiresAt: expiresAt,
         packageDurationDays: durationDays,

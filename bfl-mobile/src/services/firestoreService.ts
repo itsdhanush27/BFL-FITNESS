@@ -31,7 +31,9 @@ import type {
   InAppNotification,
   IntakeFormData,
   CoachingPlan,
+  SubscriptionFields,
 } from '../types';
+import { assertClientCanReceiveCoaching } from '../types/subscription';
 
 // ─── User Profile ──────────────────────────────────────────────────────────
 
@@ -327,3 +329,73 @@ export async function getCoachingPlans(): Promise<CoachingPlan[]> {
     return [];
   }
 }
+
+// ─── Helpers & Subscription Access ─────────────────────────────────────────
+
+/** Strips undefined properties so Firestore doesn't reject write payloads */
+export function cleanPayload<T>(obj: T): T {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) {
+    return obj.map(item => cleanPayload(item)) as unknown as T;
+  }
+  if (typeof obj === 'object') {
+    const result: Record<string, any> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (value !== undefined) {
+        result[key] = cleanPayload(value);
+      }
+    }
+    return result as T;
+  }
+  return obj;
+}
+
+/** Persist a notification to the Firestore `notifications` collection */
+export async function saveNotificationToFirestore(
+  notif: InAppNotification | Omit<InAppNotification, 'id'>
+): Promise<string> {
+  try {
+    const docId = (notif as InAppNotification).id || 'notif_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+    const cleaned = cleanPayload({
+      ...notif,
+      id: docId,
+      read: notif.read ?? false,
+      createdAt: serverTimestamp(),
+    });
+    await setDoc(doc(db, 'notifications', docId), cleaned, { merge: true });
+    return docId;
+  } catch (err) {
+    console.warn('[firestoreService] saveNotificationToFirestore warning:', err);
+    return '';
+  }
+}
+
+/** Fetches minimal subscription fields for a client */
+export async function getUserSubscriptionFields(clientId: string): Promise<SubscriptionFields | null> {
+  try {
+    const snap = await getDoc(doc(db, 'users', clientId));
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    return {
+      status: data.status,
+      subscriptionStatus: data.subscriptionStatus,
+      approvalStatus: data.approvalStatus,
+      planExpiresAt: data.planExpiresAt,
+      packageStartedAt: data.packageStartedAt,
+      cancellationRequestedAt: data.cancellationRequestedAt,
+      billingCycle: data.billingCycle,
+      sessionCredits: data.sessionCredits,
+      usedSessionCredits: data.usedSessionCredits,
+    };
+  } catch (err) {
+    console.error('[firestoreService] getUserSubscriptionFields error:', err);
+    return null;
+  }
+}
+
+/** Enforces that client can receive coaching content; throws SubscriptionExpiredError if not */
+export async function enforceSubscriptionAccess(clientId: string): Promise<void> {
+  const fields = await getUserSubscriptionFields(clientId);
+  assertClientCanReceiveCoaching(clientId, fields);
+}
+

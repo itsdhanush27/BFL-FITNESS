@@ -3,13 +3,16 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { SUBSCRIPTIONS_COL, USERS_COL } from '../services/firestoreService';
 import type { SubscriptionDocument, UserProfile } from '../types';
+import { getSubscriptionStatus, SubscriptionStatus } from '../types/subscription';
 
 export interface UseClientSubscriptionResult {
   subscription: SubscriptionDocument | null;
   userProfile: Partial<UserProfile> | null;
-  status: string;
+  status: SubscriptionStatus;
   isPendingCoachApproval: boolean;
   isActive: boolean;
+  isExpired: boolean;
+  isCancelled: boolean;
   activePlanId?: string;
   activePlanName?: string;
   activePlanPrice?: number;
@@ -17,12 +20,22 @@ export interface UseClientSubscriptionResult {
   pendingPlanPrice?: number;
   planExpiresAt?: string;
   packageStartedAt?: string;
+  billingCycle?: 'hourly' | 'weekly' | 'monthly' | 'custom';
+  sessionCredits?: number;
+  usedSessionCredits?: number;
+  remainingSessionCredits?: number;
+  pendingDowngradePlanId?: string;
+  pendingDowngradePlanName?: string;
+  pendingDowngradePlanPrice?: number;
+  downgradeEffectiveAt?: string;
+  cancellationRequestedAt?: string;
   loading: boolean;
 }
 
 /**
  * Real-time hook listening to both `subscriptions/{clientId}` and `users/{clientId}`
- * via Firebase `onSnapshot`. Immediately updates component state when the coach approves.
+ * via Firebase `onSnapshot`. Derives canonical subscription status, plan duration,
+ * and session credits.
  */
 export function useClientSubscription(clientId?: string): UseClientSubscriptionResult {
   const [subscription, setSubscription] = useState<SubscriptionDocument | null>(null);
@@ -38,7 +51,6 @@ export function useClientSubscription(clientId?: string): UseClientSubscriptionR
     }
 
     setLoading(true);
-    console.log(`[useClientSubscription] Initializing real-time onSnapshot listeners for client: ${clientId}`);
 
     // 1. Real-time listener on subscriptions/{clientId}
     const subRef = doc(db, SUBSCRIPTIONS_COL, clientId);
@@ -47,19 +59,8 @@ export function useClientSubscription(clientId?: string): UseClientSubscriptionR
       (snap) => {
         if (snap.exists()) {
           const subData = { id: snap.id, ...snap.data() } as SubscriptionDocument;
-          console.log(`[useClientSubscription] Firestore snapshot (subscriptions/${clientId}):`, {
-            exists: true,
-            status: subData.status,
-            pendingPlanId: subData.pendingPlanId,
-            pendingPlanName: subData.pendingPlanName,
-            activePlanId: (subData as any).activePlanId || subData.currentActivePlanId,
-            activePlanName: (subData as any).activePlanName || subData.currentActivePlanName,
-            approvedAt: subData.approvedAt,
-            planExpiresAt: subData.planExpiresAt,
-          });
           setSubscription(subData);
         } else {
-          console.log(`[useClientSubscription] Firestore snapshot (subscriptions/${clientId}): document does not exist`);
           setSubscription(null);
         }
         setLoading(false);
@@ -77,18 +78,8 @@ export function useClientSubscription(clientId?: string): UseClientSubscriptionR
       (snap) => {
         if (snap.exists()) {
           const userData = snap.data() as UserProfile;
-          console.log(`[useClientSubscription] Firestore snapshot (users/${clientId}):`, {
-            exists: true,
-            subscriptionStatus: userData.subscriptionStatus,
-            status: userData.status,
-            activePlanId: userData.activePlanId,
-            activePlanName: userData.activePlanName,
-            pendingPlanId: userData.pendingPlanId,
-            planExpiresAt: userData.planExpiresAt,
-          });
           setUserProfile(userData);
         } else {
-          console.log(`[useClientSubscription] Firestore snapshot (users/${clientId}): document does not exist`);
           setUserProfile(null);
         }
       },
@@ -98,40 +89,65 @@ export function useClientSubscription(clientId?: string): UseClientSubscriptionR
     );
 
     return () => {
-      console.log(`[useClientSubscription] Cleaning up real-time listeners for clientId: ${clientId}`);
       unsubSub();
       unsubUser();
     };
   }, [clientId]);
 
-  // Derive canonical status:
-  // If either document has been transitioned to 'active', the program is officially approved & initialized!
-  const isDocActive = subscription?.status === 'active' || userProfile?.subscriptionStatus === 'active';
-  const isDocPending = 
-    (subscription?.status === 'pending_coach_approval' || 
-     userProfile?.subscriptionStatus === 'pending_coach_approval' || 
-     Boolean(userProfile?.pendingPlanId)) && 
-    !isDocActive;
+  // Merge fields to check canonical subscription status
+  const effectiveExpiresAt = subscription?.planExpiresAt || userProfile?.planExpiresAt;
+  const effectiveStartedAt = subscription?.packageStartedAt || userProfile?.packageStartedAt;
+  const effectiveSubStatus = subscription?.status || userProfile?.subscriptionStatus;
+  const effectiveStatus = userProfile?.status;
+  const billingCycle = subscription?.billingCycle || userProfile?.billingCycle || 'monthly';
+  const sessionCredits = typeof userProfile?.sessionCredits === 'number'
+    ? userProfile.sessionCredits
+    : subscription?.sessionCredits;
+  const usedSessionCredits = userProfile?.usedSessionCredits || 0;
+  const remainingSessionCredits = typeof sessionCredits === 'number'
+    ? Math.max(0, sessionCredits - usedSessionCredits)
+    : undefined;
 
-  const resolvedStatus = isDocActive 
-    ? 'active' 
-    : isDocPending 
-    ? 'pending_coach_approval' 
-    : (subscription?.status || userProfile?.subscriptionStatus || 'active');
+  const resolvedStatus: SubscriptionStatus = getSubscriptionStatus({
+    status: effectiveStatus,
+    subscriptionStatus: effectiveSubStatus,
+    planExpiresAt: effectiveExpiresAt,
+    packageStartedAt: effectiveStartedAt,
+    cancellationRequestedAt: userProfile?.cancellationRequestedAt,
+    billingCycle,
+    sessionCredits,
+    usedSessionCredits,
+  });
+
+  const isActive = resolvedStatus === 'active';
+  const isExpired = resolvedStatus === 'expired';
+  const isCancelled = resolvedStatus === 'cancelled';
+  const isPendingCoachApproval = resolvedStatus === 'pending_coach_approval';
 
   return {
     subscription,
     userProfile,
     status: resolvedStatus,
-    isPendingCoachApproval: isDocPending,
-    isActive: isDocActive,
+    isPendingCoachApproval,
+    isActive,
+    isExpired,
+    isCancelled,
     activePlanId: (subscription as any)?.activePlanId || subscription?.currentActivePlanId || userProfile?.activePlanId,
     activePlanName: (subscription as any)?.activePlanName || subscription?.currentActivePlanName || userProfile?.activePlanName,
     activePlanPrice: (subscription as any)?.activePlanPrice || userProfile?.activePlanPrice,
     pendingPlanName: subscription?.pendingPlanName || userProfile?.pendingPlanName,
     pendingPlanPrice: subscription?.pendingPlanPrice || userProfile?.pendingPlanPrice,
-    planExpiresAt: subscription?.planExpiresAt || userProfile?.planExpiresAt,
-    packageStartedAt: subscription?.packageStartedAt || userProfile?.packageStartedAt,
+    planExpiresAt: effectiveExpiresAt,
+    packageStartedAt: effectiveStartedAt,
+    billingCycle,
+    sessionCredits,
+    usedSessionCredits,
+    remainingSessionCredits,
+    pendingDowngradePlanId: userProfile?.pendingDowngradePlanId || subscription?.pendingDowngradePlanId,
+    pendingDowngradePlanName: userProfile?.pendingDowngradePlanName || subscription?.pendingDowngradePlanName,
+    pendingDowngradePlanPrice: userProfile?.pendingDowngradePlanPrice || subscription?.pendingDowngradePlanPrice,
+    downgradeEffectiveAt: userProfile?.downgradeEffectiveAt || subscription?.downgradeEffectiveAt,
+    cancellationRequestedAt: userProfile?.cancellationRequestedAt,
     loading
   };
 }

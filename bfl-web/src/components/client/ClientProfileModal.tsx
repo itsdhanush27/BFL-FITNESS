@@ -28,7 +28,9 @@ import { useClientSubscription } from '../../hooks/useClientSubscription';
 import { TransactionRecord } from '../../types';
 import { 
   subscribeToClientTransactions,
-  fetchClientTransactions 
+  fetchClientTransactions,
+  cancelClientSubscription,
+  reactivateClientSubscription
 } from '../../services/stripeService';
 import { 
   downloadReceiptPdf, 
@@ -67,19 +69,61 @@ export const ClientProfileModal: React.FC<ClientProfileModalProps> = ({
     activePlanPrice: liveActivePlanPrice,
     pendingPlanName: livePendingPlanName,
     pendingPlanPrice: livePendingPlanPrice,
-    planExpiresAt: livePlanExpiresAt
+    planExpiresAt: livePlanExpiresAt,
+    billingCycle: liveBillingCycle,
+    remainingSessionCredits: liveRemainingCredits,
+    isCancelled: liveIsCancelled,
+    cancellationRequestedAt: liveCancellationRequestedAt,
+    pendingDowngradePlanName: livePendingDowngradePlanName,
+    downgradeEffectiveAt: liveDowngradeEffectiveAt,
   } = useClientSubscription(isOpen ? user?.uid : undefined);
 
   const [displayName, setDisplayName] = useState(user?.displayName || '');
   const [photoURL, setPhotoURL] = useState(user?.photoURL || '');
   const [phone, setPhone] = useState('+1 (555) 234-5678');
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
 
   // Find assigned coach and roster entry
   const clientRosterEntry = clients?.find(c => c.id === user?.uid || c.email === user?.email);
   const clientCoachId = user?.assignedCoachId || (clientRosterEntry as any)?.assignedCoachId || (clientIntake as any)?.assignedCoachId;
   const assignedCoach = coaches.find(c => c.id === clientCoachId) || coaches[0];
   const activePlan = coachingPlans.find(p => p.id === user?.activePlanId) || coachingPlans[0];
+
+  const billingCycle = liveBillingCycle || user?.billingCycle || (clientRosterEntry as any)?.billingCycle || activePlan?.billingCycle || 'monthly';
+  const remainingSessionCredits = liveRemainingCredits !== undefined ? liveRemainingCredits : (user?.remainingSessionCredits ?? (clientRosterEntry as any)?.remainingSessionCredits);
+  const pendingDowngradePlanName = livePendingDowngradePlanName || (user as any)?.pendingDowngradePlanName || (clientRosterEntry as any)?.pendingDowngradePlanName;
+  const downgradeEffectiveAt = liveDowngradeEffectiveAt || (user as any)?.downgradeEffectiveAt || (clientRosterEntry as any)?.downgradeEffectiveAt;
+  const cancellationRequestedAt = liveCancellationRequestedAt || (user as any)?.cancellationRequestedAt || (clientRosterEntry as any)?.cancellationRequestedAt;
+
+  const handleCancel = async () => {
+    if (!user?.uid) return;
+    setActionLoading(true);
+    try {
+      await cancelClientSubscription(user.uid);
+      setActionMessage('Subscription scheduled for cancellation at the end of the current billing period.');
+      setCancelConfirmOpen(false);
+    } catch (err: any) {
+      setActionMessage(err.message || 'Failed to cancel subscription.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleReactivate = async () => {
+    if (!user?.uid) return;
+    setActionLoading(true);
+    try {
+      await reactivateClientSubscription(user.uid);
+      setActionMessage('Subscription reactivated successfully!');
+    } catch (err: any) {
+      setActionMessage(err.message || 'Failed to reactivate subscription.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
 
   // Subscribe to real-time client transaction records for billing & PDF receipt downloads
   useEffect(() => {
@@ -143,7 +187,10 @@ export const ClientProfileModal: React.FC<ClientProfileModalProps> = ({
     subscriptionStatus: liveIsActive ? 'active' : (clientRosterEntry?.subscriptionStatus ?? user?.subscriptionStatus),
     status: liveIsActive ? 'active' : (clientRosterEntry?.status ?? user?.status),
     packageStartedAt: effectiveStartedAt,
-    cancellationRequestedAt: (clientRosterEntry as any)?.cancellationRequestedAt ?? (user as any)?.cancellationRequestedAt,
+    cancellationRequestedAt: cancellationRequestedAt,
+    billingCycle: (billingCycle as any),
+    sessionCredits: (user?.sessionCredits ?? (clientRosterEntry as any)?.sessionCredits),
+    usedSessionCredits: (user?.usedSessionCredits ?? (clientRosterEntry as any)?.usedSessionCredits),
   });
 
   const isRenewalPending = Boolean(
@@ -259,10 +306,51 @@ export const ClientProfileModal: React.FC<ClientProfileModalProps> = ({
           </button>
         </div>
 
-        {/* ─── TAB 1: BILLING, INVOICES & 1-MONTH ACTIVATION ─── */}
+        {/* ─── TAB 1: BILLING, INVOICES & SUBSCRIPTION MANAGEMENT ─── */}
         {activeTab === 'billing' && (
           <div className="space-y-5">
-            {/* Active Subscription & 1-Month Activation Banner */}
+            {/* Action Feedback Message */}
+            {actionMessage && (
+              <div className="p-3.5 rounded-2xl bg-neutral-900 text-white text-xs flex items-center justify-between gap-2 animate-in fade-in">
+                <span>{actionMessage}</span>
+                <button onClick={() => setActionMessage(null)} className="text-neutral-400 hover:text-white text-xs font-bold">Dismiss</button>
+              </div>
+            )}
+
+            {/* Scheduled Downgrade Notice Banner */}
+            {pendingDowngradePlanName && (
+              <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 text-amber-900 text-xs flex items-start gap-3 shadow-xs animate-in fade-in">
+                <Clock className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <p className="font-bold text-sm">Scheduled Plan Switch</p>
+                  <p className="text-amber-800">
+                    Your plan will automatically switch to <strong>{pendingDowngradePlanName}</strong> on {downgradeEffectiveAt ? formatReceiptDate(downgradeEffectiveAt) : 'the end of your current period'}. Your current higher-tier coaching features remain fully active until then.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Cancelled at Period End Notice Banner */}
+            {cancellationRequestedAt && !isExpired && (
+              <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 text-amber-900 text-xs flex items-center justify-between gap-3 shadow-xs animate-in fade-in">
+                <div className="flex items-center gap-2.5">
+                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                  <div>
+                    <p className="font-bold">Cancellation Scheduled</p>
+                    <p className="text-amber-800">Paid access remains active until {expiryFormatted}.</p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleReactivate}
+                  disabled={actionLoading}
+                  className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer"
+                >
+                  {actionLoading ? 'Reactivating...' : 'Reactivate Subscription'}
+                </button>
+              </div>
+            )}
+
+            {/* Active Subscription Banner */}
             <div className={`border-2 rounded-2xl p-5 ${
               isExpired
                 ? 'bg-red-50/70 border-red-300'
@@ -276,7 +364,7 @@ export const ClientProfileModal: React.FC<ClientProfileModalProps> = ({
                     <span className={`text-[10px] font-extrabold uppercase tracking-widest ${
                       isExpired ? 'text-red-700' : isRenewalPending ? 'text-amber-800' : 'text-red-400'
                     }`}>
-                      Current Subscription
+                      Current Subscription • {billingCycle ? billingCycle.toUpperCase() : 'MONTHLY'}
                     </span>
 
                     {isExpired ? (
@@ -303,46 +391,91 @@ export const ClientProfileModal: React.FC<ClientProfileModalProps> = ({
                   </h3>
 
                   <p className={`text-xs ${!isExpired && !isRenewalPending ? 'text-neutral-300' : 'text-neutral-600'}`}>
-                    ${displayPlanPrice} AUD {activePlan?.period || '/ month'}
+                    ${displayPlanPrice} AUD {activePlan?.period || (billingCycle === 'weekly' ? '/ week' : billingCycle === 'hourly' ? '/ hour' : '/ month')}
                   </p>
                 </div>
 
-                <button
-                  onClick={() => {
-                    onClose();
-                    if (onOpenPlanSelection) onOpenPlanSelection();
-                    else if (onOpenRenewal) onOpenRenewal();
-                    else if (onOpenCheckout) onOpenCheckout('plan_online_monthly');
-                  }}
-                  className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-extrabold text-xs uppercase tracking-wider transition-colors shadow-md shadow-red-600/30 self-start sm:self-auto cursor-pointer flex items-center gap-1.5"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-white" />
-                  <span>{isExpired ? 'Re-Enroll Package' : 'Change / Upgrade Plan'}</span>
-                </button>
+                <div className="flex items-center gap-2 self-start sm:self-auto">
+                  <button
+                    onClick={() => {
+                      onClose();
+                      if (onOpenPlanSelection) onOpenPlanSelection();
+                      else if (onOpenRenewal) onOpenRenewal();
+                      else if (onOpenCheckout) onOpenCheckout('plan_online_monthly');
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-extrabold text-xs uppercase tracking-wider transition-colors shadow-md shadow-red-600/30 cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-white" />
+                    <span>{isExpired ? 'Re-Enroll Package' : 'Change / Upgrade Plan'}</span>
+                  </button>
+
+                  {!isExpired && !cancellationRequestedAt && (
+                    <button
+                      onClick={() => setCancelConfirmOpen(true)}
+                      className="px-3 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white border border-neutral-700 text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
               </div>
 
-              {/* 1-Month Plan Activation Dates Details */}
+              {/* Plan Details & Dates */}
               <div className={`mt-4 pt-4 border-t grid grid-cols-1 sm:grid-cols-3 gap-3 ${
                 !isExpired && !isRenewalPending ? 'border-white/10 text-neutral-200' : 'border-neutral-200 text-neutral-800'
               }`}>
                 <div className={`p-2.5 rounded-xl ${!isExpired && !isRenewalPending ? 'bg-white/5 border border-white/10' : 'bg-white border border-neutral-200'}`}>
-                  <span className="text-[10px] font-bold uppercase tracking-wider block text-neutral-400">1-Month Start Date</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider block text-neutral-400">Start Date</span>
                   <span className="text-xs font-bold font-mono text-emerald-400">{startFormatted}</span>
                 </div>
 
                 <div className={`p-2.5 rounded-xl ${!isExpired && !isRenewalPending ? 'bg-white/5 border border-white/10' : 'bg-white border border-neutral-200'}`}>
-                  <span className="text-[10px] font-bold uppercase tracking-wider block text-neutral-400">1-Month End Date</span>
-                  <span className="text-xs font-bold font-mono text-red-400">{expiryFormatted || '30 Days from Start'}</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider block text-neutral-400">
+                    {billingCycle === 'hourly' ? 'Booking Window End' : 'Expiry Date'}
+                  </span>
+                  <span className="text-xs font-bold font-mono text-red-400">{expiryFormatted || 'Valid'}</span>
                 </div>
 
                 <div className={`p-2.5 rounded-xl ${!isExpired && !isRenewalPending ? 'bg-white/5 border border-white/10' : 'bg-white border border-neutral-200'}`}>
-                  <span className="text-[10px] font-bold uppercase tracking-wider block text-neutral-400">Days Remaining</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider block text-neutral-400">
+                    {billingCycle === 'hourly' ? 'Session Credits' : 'Days Remaining'}
+                  </span>
                   <span className="text-xs font-black font-mono">
-                    {isExpired ? '0 Days (Expired)' : `${daysRemaining} Days Active`}
+                    {billingCycle === 'hourly'
+                      ? `${remainingSessionCredits !== undefined ? remainingSessionCredits : 1} Credit${remainingSessionCredits === 1 ? '' : 's'} Remaining`
+                      : isExpired ? '0 Days (Expired)' : `${daysRemaining} Days Active`}
                   </span>
                 </div>
               </div>
             </div>
+
+            {/* Cancel Confirmation Modal / Inline Sheet */}
+            {cancelConfirmOpen && (
+              <div className="p-4 rounded-2xl bg-neutral-900 border-2 border-red-500 text-white space-y-3 animate-in fade-in">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-red-400" />
+                  <h4 className="font-bold text-sm">Cancel Subscription Confirmation</h4>
+                </div>
+                <p className="text-xs text-neutral-300 leading-relaxed">
+                  Your cancellation will take effect at the end of your paid billing period ({expiryFormatted}). You will retain full access to all coaching features until then, and your historical workouts will never be deleted.
+                </p>
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={handleCancel}
+                    disabled={actionLoading}
+                    className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold uppercase tracking-wider transition-colors cursor-pointer"
+                  >
+                    {actionLoading ? 'Processing...' : 'Confirm Cancellation'}
+                  </button>
+                  <button
+                    onClick={() => setCancelConfirmOpen(false)}
+                    className="px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer"
+                  >
+                    Keep My Subscription
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Invoices & PDF Receipts Section */}
             <div className="space-y-3">

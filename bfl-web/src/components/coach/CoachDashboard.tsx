@@ -116,6 +116,7 @@ export const CoachDashboard: React.FC<CoachDashboardProps> = ({
   // Selected Client for detail viewing
   const [selectedClientId, setSelectedClientId] = useState<string>(clients[0]?.id || '');
   const [clientSearch, setClientSearch] = useState('');
+  const [clientExpiryFilter, setClientExpiryFilter] = useState<'all' | 'expiring_soon' | 'expired'>('all');
   const [isApproving, setIsApproving] = useState<string | null>(null);
 
   // Program Builder State
@@ -305,13 +306,24 @@ export const CoachDashboard: React.FC<CoachDashboardProps> = ({
 
   const filteredClients = React.useMemo(() => {
     const q = clientSearch.toLowerCase();
-    return visibleClients.filter(
-      (c) =>
+    return visibleClients.filter((c) => {
+      const matchesSearch =
         (c.name || '').toLowerCase().includes(q) ||
         (c.email || '').toLowerCase().includes(q) ||
-        (c.planName || '').toLowerCase().includes(q)
-    );
-  }, [visibleClients, clientSearch]);
+        (c.planName || '').toLowerCase().includes(q);
+      if (!matchesSearch) return false;
+
+      if (clientExpiryFilter === 'expiring_soon') {
+        const days = getDaysRemaining(c.planExpiresAt);
+        return days <= 3 && days >= 0 && canReceiveCoaching(c);
+      }
+      if (clientExpiryFilter === 'expired') {
+        const isClientPending = c.subscriptionStatus === 'pending_coach_approval' || c.subscriptionStatus === 'pending_approval' || Boolean(c.pendingPlanId) || Boolean((c as any).renewalRequestedPlanId) || c.status === 'pending';
+        return !isClientPending && !canReceiveCoaching(c);
+      }
+      return true;
+    });
+  }, [visibleClients, clientSearch, clientExpiryFilter]);
 
   const visibleClientIds = React.useMemo(() => visibleClients.map((c) => c.id).join(','), [visibleClients]);
 
@@ -964,16 +976,57 @@ export const CoachDashboard: React.FC<CoachDashboardProps> = ({
                   </p>
                 </div>
 
-                {/* Search Bar */}
-                <div className="w-full md:w-72 relative">
-                  <input
-                    type="text"
-                    value={clientSearch}
-                    onChange={(e) => setClientSearch(e.target.value)}
-                    placeholder="Filter clients..."
-                    className="w-full pl-9 pr-4 py-2 rounded-xl bg-neutral-50 border border-neutral-300 text-neutral-900 text-xs focus:bg-white focus:border-red-600 focus:outline-none"
-                  />
-                  <Search className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
+                  {/* Status / Expiry Filter Pills */}
+                  <div className="flex items-center gap-1.5 p-1 bg-neutral-100 rounded-xl text-xs font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setClientExpiryFilter('all')}
+                      className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                        clientExpiryFilter === 'all'
+                          ? 'bg-white text-neutral-900 shadow-xs'
+                          : 'text-neutral-500 hover:text-neutral-900'
+                      }`}
+                    >
+                      All ({visibleClients.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setClientExpiryFilter('expiring_soon')}
+                      className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer flex items-center gap-1 ${
+                        clientExpiryFilter === 'expiring_soon'
+                          ? 'bg-amber-500 text-white shadow-xs'
+                          : 'text-amber-700 hover:text-amber-900'
+                      }`}
+                    >
+                      <Clock className="w-3 h-3" />
+                      <span>Expiring Soon</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setClientExpiryFilter('expired')}
+                      className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer flex items-center gap-1 ${
+                        clientExpiryFilter === 'expired'
+                          ? 'bg-red-600 text-white shadow-xs'
+                          : 'text-red-600 hover:text-red-800'
+                      }`}
+                    >
+                      <AlertTriangle className="w-3 h-3" />
+                      <span>Expired</span>
+                    </button>
+                  </div>
+
+                  {/* Search Bar */}
+                  <div className="w-full sm:w-64 relative">
+                    <input
+                      type="text"
+                      value={clientSearch}
+                      onChange={(e) => setClientSearch(e.target.value)}
+                      placeholder="Filter clients..."
+                      className="w-full pl-9 pr-4 py-2 rounded-xl bg-neutral-50 border border-neutral-300 text-neutral-900 text-xs focus:bg-white focus:border-red-600 focus:outline-none"
+                    />
+                    <Search className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  </div>
                 </div>
               </div>
 
@@ -1050,8 +1103,30 @@ export const CoachDashboard: React.FC<CoachDashboardProps> = ({
                             </td>
 
                             <td className="py-4 px-6">
-                              <div className="font-semibold text-neutral-900">{c.activePlanName || c.planName}</div>
-                              <span className="text-[11px] text-neutral-500">{c.primaryGoal}</span>
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-neutral-900">{c.activePlanName || c.planName}</span>
+                                <span className="px-1.5 py-0.2 rounded text-[9px] font-black uppercase tracking-wider bg-neutral-100 text-neutral-700 border border-neutral-200">
+                                  {c.billingCycle ? c.billingCycle.toUpperCase() : 'MONTHLY'}
+                                </span>
+                              </div>
+                              <span className="text-[11px] text-neutral-500 block">{c.primaryGoal}</span>
+
+                              {/* Hourly session credits pill */}
+                              {(c.billingCycle === 'hourly' || c.sessionCredits !== undefined) && (
+                                <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-800 text-[10px] font-bold">
+                                  <Dumbbell className="w-2.5 h-2.5 text-blue-600" />
+                                  <span>Credits: {c.remainingSessionCredits !== undefined ? c.remainingSessionCredits : (c.sessionCredits || 1) - (c.usedSessionCredits || 0)} / {c.sessionCredits || 1}</span>
+                                </div>
+                              )}
+
+                              {/* Pending Downgrade pill */}
+                              {c.pendingDowngradePlanName && (
+                                <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-blue-50 border border-blue-300 text-blue-900 text-[10px] font-bold">
+                                  <Clock className="w-2.5 h-2.5 text-blue-700" />
+                                  <span>Downgrading to: {c.pendingDowngradePlanName} ({c.downgradeEffectiveAt ? new Date(c.downgradeEffectiveAt).toLocaleDateString() : 'Next Cycle'})</span>
+                                </div>
+                              )}
+
                               {c.pendingPlanName ? (
                                 <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-100 border border-amber-300 text-amber-900 text-[10px] font-bold">
                                   <Clock className="w-2.5 h-2.5 text-amber-700" />
