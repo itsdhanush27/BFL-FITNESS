@@ -1,0 +1,170 @@
+name: Build Android APK & GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Release version (e.g. v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+      release_notes:
+        description: 'Changelog / Release notes'
+        required: false
+        default: 'Production Android APK release for BFL Fitness.'
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: bfl-mobile/package-lock.json
+
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Mobile Dependencies
+        working-directory: bfl-mobile
+        run: npm ci
+
+      - name: Configure Production Environment Variables
+        working-directory: bfl-mobile
+        run: |
+          API_URL="${{ secrets.EXPO_PUBLIC_API_URL }}"
+          if [ -z "$API_URL" ]; then
+            API_URL="${{ vars.EXPO_PUBLIC_API_URL }}"
+          fi
+          if [ -z "$API_URL" ]; then
+            API_URL="https://bfl-fitness.vercel.app"
+          fi
+          
+          echo "EXPO_PUBLIC_API_URL=$API_URL" > .env
+          
+          if [ -n "${{ secrets.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY }}" ]; then
+            echo "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY=${{ secrets.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY }}" >> .env
+          fi
+          echo "Mobile environment configured with API: $API_URL"
+
+      - name: Expo Prebuild (Generate Native Android Project)
+        working-directory: bfl-mobile
+        run: npx expo prebuild --platform android --clean
+
+      - name: Grant Execute Permission to Gradle Wrapper
+        working-directory: bfl-mobile/android
+        run: chmod +x gradlew
+
+      - name: Build Android Release APK with Gradle
+        working-directory: bfl-mobile/android
+        run: ./gradlew assembleRelease --no-daemon -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m"
+
+      - name: Sign APK (Ensures Instant Installation On Android)
+        working-directory: bfl-mobile
+        run: |
+          RAW_APK=$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ]; then
+            echo "::error::No APK file found in build outputs!"
+            exit 1
+          fi
+          echo "Found compiled APK: $RAW_APK"
+
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
+          echo "Using apksigner at: $APKSIGNER"
+
+          # Check if custom keystore secret is supplied
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "Using custom keystore from repository secrets..."
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > release.keystore
+            $APKSIGNER sign --ks release.keystore \
+              --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS || 'bflfitness' }}" \
+              --ks-pass pass:"${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+              --key-pass pass:"${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+              --out android/app/build/outputs/apk/release/app-signed.apk "$RAW_APK"
+          else
+            echo "Generating release signing key for distribution..."
+            keytool -genkey -v -keystore release.keystore -alias bflfitness -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass bflfitness123 -keypass bflfitness123 \
+              -dname "CN=BFL Fitness, OU=Mobile, O=BFL, L=Sydney, S=NSW, C=AU"
+            
+            $APKSIGNER sign --ks release.keystore \
+              --ks-key-alias bflfitness \
+              --ks-pass pass:bflfitness123 \
+              --key-pass pass:bflfitness123 \
+              --out android/app/build/outputs/apk/release/app-signed.apk "$RAW_APK"
+          fi
+
+          if [ -f "android/app/build/outputs/apk/release/app-signed.apk" ]; then
+            mv android/app/build/outputs/apk/release/app-signed.apk "$RAW_APK"
+            echo "Successfully verified and signed APK."
+          fi
+
+      - name: Package & Label APK
+        id: package_apk
+        run: |
+          VERSION="${{ github.ref_name }}"
+          if [[ "$VERSION" != v* ]]; then
+            VERSION="${{ github.event.inputs.version_name || 'v1.0.0' }}"
+          fi
+
+          SOURCE_APK=$(find bfl-mobile/android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          DIST_NAME="BFL-Fitness-${VERSION}.apk"
+          cp "$SOURCE_APK" "$DIST_NAME"
+
+          echo "apk_file=$DIST_NAME" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Prepared APK: $DIST_NAME ($(ls -lh $DIST_NAME | awk '{print $5}'))"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package_apk.outputs.version }}-apk
+          path: ${{ steps.package_apk.outputs.apk_file }}
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ steps.package_apk.outputs.version }}
+          name: BFL Fitness Android ${{ steps.package_apk.outputs.version }}
+          body: |
+            ## 📱 BFL Fitness Mobile (Android) - ${{ steps.package_apk.outputs.version }}
+
+            ${{ github.event.inputs.release_notes || 'Official production APK for the BFL Fitness Android application.' }}
+
+            ---
+            ### 📥 Download & Installation:
+            1. Download the attached **`${{ steps.package_apk.outputs.apk_file }}`** directly to your Android device.
+            2. Tap the file in your notifications or Downloads folder to install.
+            3. If prompted by Android, enable **"Install unknown apps"** for your browser or file manager.
+            4. Open **BFL Fitness** and log in!
+
+            *SHA256 Checksum:*
+            ```text
+            $(sha256sum ${{ steps.package_apk.outputs.apk_file }} | awk '{print $1}')
+            ```
+          files: ${{ steps.package_apk.outputs.apk_file }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

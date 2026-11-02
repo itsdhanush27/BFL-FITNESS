@@ -20,3 +20,9 @@ build/
 web-build/
 *.log
 .DS_Store
+*.apk
+*.aab
+*.keystore
+*.jks
+**/android/
+**/ios/
