@@ -20,6 +20,7 @@ import {
   verifyAndFulfillMobileCheckoutSession,
   executeMobileStripePayment,
 } from '../services/stripeService';
+import { getCoachingPlans } from '../services/firestoreService';
 import { calculatePlanPeriod } from '../utils/planDurationUtils';
 
 interface PlanCheckoutModalProps {
@@ -41,6 +42,10 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
   clientId,
   onSuccess,
 }) => {
+  const [selectedPlan, setSelectedPlan] = useState<CoachingPlan>(plan);
+  const [availablePlans, setAvailablePlans] = useState<CoachingPlan[]>([]);
+  const [showPlanPicker, setShowPlanPicker] = useState(false);
+
   const [cardholderName, setCardholderName] = useState(clientName || '');
   const [cardNumber, setCardNumber] = useState('');
   const [expiry, setExpiry] = useState('');
@@ -50,7 +55,21 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [verifyingSession, setVerifyingSession] = useState(false);
 
-  const planInfo = calculatePlanPeriod(plan);
+  React.useEffect(() => {
+    setSelectedPlan(plan);
+  }, [plan]);
+
+  React.useEffect(() => {
+    if (visible) {
+      getCoachingPlans().then((plans) => {
+        if (plans && plans.length > 0) {
+          setAvailablePlans(plans);
+        }
+      });
+    }
+  }, [visible]);
+
+  const planInfo = calculatePlanPeriod(selectedPlan);
   const { formattedStart, formattedEnd } = planInfo;
 
   const formatCardNumber = (text: string) => {
@@ -76,7 +95,7 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
         clientId,
         clientName: cardholderName || clientName,
         clientEmail,
-        plan,
+        plan: selectedPlan,
       });
 
       setPendingSessionId(session.sessionId);
@@ -105,7 +124,7 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
 
     setVerifyingSession(true);
     try {
-      const tx = await verifyAndFulfillMobileCheckoutSession(pendingSessionId, plan);
+      const tx = await verifyAndFulfillMobileCheckoutSession(pendingSessionId, selectedPlan);
       setVerifyingSession(false);
       onClose();
       onSuccess(tx);
@@ -145,7 +164,7 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
         clientId,
         clientName: cardholderName || clientName,
         clientEmail,
-        plan,
+        plan: selectedPlan,
         card: {
           cardNumber: rawCard,
           expiryMonth: expMonth,
@@ -219,23 +238,71 @@ export const PlanCheckoutModal: React.FC<PlanCheckoutModalProps> = ({
           {/* Plan Summary */}
           <View style={styles.planCard}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.planCategory}>
-                {(plan.category || 'online').toUpperCase().replace(/_/g, ' ')}
-              </Text>
-              <Text style={styles.planName}>{plan.name}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Text style={styles.planCategory}>
+                  {(selectedPlan.category || 'online').toUpperCase().replace(/_/g, ' ')}
+                </Text>
+                {availablePlans.length > 0 && (
+                  <TouchableOpacity
+                    onPress={() => setShowPlanPicker(!showPlanPicker)}
+                    style={styles.switchPlanBtn}
+                  >
+                    <Ionicons name="swap-horizontal" size={14} color={Colors.primary} />
+                    <Text style={styles.switchPlanBtnText}>
+                      {showPlanPicker ? 'Close Plans' : 'Switch Tier'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+              <Text style={styles.planName}>{selectedPlan.name}</Text>
               <Text style={styles.planPeriod}>
                 {planInfo.isHourlySession
                   ? '1 Session Credit (Valid 30 Days)'
                   : `${planInfo.durationDays} Days Access`}
               </Text>
             </View>
-            <View style={{ alignItems: 'flex-end' }}>
-              <Text style={styles.planPrice}>${plan.price}</Text>
+            <View style={{ alignItems: 'flex-end', justifyContent: 'center', marginLeft: 12 }}>
+              <Text style={styles.planPrice}>${selectedPlan.price}</Text>
               <Text style={styles.planCurrency}>
-                AUD {plan.period || (planInfo.billingCycle === 'weekly' ? '/ week' : planInfo.isHourlySession ? '/ session' : '/ month')}
+                AUD {selectedPlan.period || (planInfo.billingCycle === 'weekly' ? '/ week' : planInfo.isHourlySession ? '/ session' : '/ month')}
               </Text>
             </View>
           </View>
+
+          {/* Plan Picker List if user wants to switch tiers */}
+          {showPlanPicker && availablePlans.length > 0 && (
+            <View style={styles.planPickerContainer}>
+              <Text style={styles.planPickerTitle}>SELECT COACHING TIER</Text>
+              {availablePlans.map((p) => {
+                const isCurrent = p.id === selectedPlan.id;
+                return (
+                  <TouchableOpacity
+                    key={p.id}
+                    style={[styles.planPickerItem, isCurrent && styles.planPickerItemActive]}
+                    onPress={() => {
+                      setSelectedPlan(p);
+                      setShowPlanPicker(false);
+                    }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.planPickerItemName, isCurrent && { color: Colors.primary }]}>
+                        {p.name}
+                      </Text>
+                      <Text style={styles.planPickerItemTagline} numberOfLines={1}>
+                        {p.tagline}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end', marginLeft: 10 }}>
+                      <Text style={[styles.planPickerItemPrice, isCurrent && { color: Colors.primary }]}>
+                        ${p.price}
+                      </Text>
+                      <Text style={styles.planPickerItemPeriod}>{p.period || '/ month'}</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
 
           {/* Activation Dates Card */}
           <View style={styles.datesCard}>
@@ -545,6 +612,71 @@ const styles = StyleSheet.create({
   },
   planCurrency: {
     fontSize: 9,
+    color: Colors.textMuted,
+  },
+  switchPlanBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: BorderRadius.sm,
+    backgroundColor: 'rgba(220, 38, 38, 0.08)',
+  },
+  switchPlanBtnText: {
+    fontSize: 10,
+    fontWeight: FontWeights.bold,
+    color: Colors.primary,
+    marginLeft: 4,
+  },
+  planPickerContainer: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: BorderRadius.xl,
+    padding: Spacing.sm,
+    marginBottom: Spacing.md,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  planPickerTitle: {
+    fontSize: 9,
+    fontWeight: FontWeights.black,
+    letterSpacing: 0.5,
+    color: Colors.textMuted,
+    marginBottom: Spacing.xs,
+    marginLeft: Spacing.xs,
+  },
+  planPickerItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: Spacing.sm,
+    borderRadius: BorderRadius.md,
+    backgroundColor: Colors.white,
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  planPickerItemActive: {
+    borderColor: Colors.primary,
+    backgroundColor: '#FEF2F2',
+  },
+  planPickerItemName: {
+    fontSize: FontSizes.xs,
+    fontWeight: FontWeights.bold,
+    color: Colors.textPrimary,
+  },
+  planPickerItemTagline: {
+    fontSize: 9,
+    color: Colors.textTertiary,
+    marginTop: 1,
+  },
+  planPickerItemPrice: {
+    fontSize: FontSizes.sm,
+    fontWeight: FontWeights.black,
+    color: Colors.textPrimary,
+    fontFamily: 'monospace',
+  },
+  planPickerItemPeriod: {
+    fontSize: 8,
     color: Colors.textMuted,
   },
   datesCard: {

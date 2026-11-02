@@ -729,8 +729,7 @@ export async function fetchClientTransactions(clientId: string): Promise<Transac
   try {
     const q = query(
       collection(db, 'transactions'),
-      where('clientId', '==', clientId),
-      orderBy('createdAt', 'desc')
+      where('clientId', '==', clientId)
     );
     const snap = await getDocs(q);
     const remoteTx = snap.docs.map(d => ({ id: d.id, ...d.data() } as TransactionRecord));
@@ -738,6 +737,7 @@ export async function fetchClientTransactions(clientId: string): Promise<Transac
     for (const l of localTx) {
       if (!combined.some(r => r.id === l.id)) combined.push(l);
     }
+    combined.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
     return combined;
   } catch (err) {
     console.warn('[mobileStripeService] fetchClientTransactions notice:', err);
@@ -764,8 +764,7 @@ export function subscribeToClientTransactions(
 
   const q = query(
     collection(db, 'transactions'),
-    where('clientId', '==', clientId),
-    orderBy('createdAt', 'desc')
+    where('clientId', '==', clientId)
   );
   return onSnapshot(
     q,
@@ -776,11 +775,13 @@ export function subscribeToClientTransactions(
       for (const l of local) {
         if (!combined.some((r) => r.id === l.id)) combined.push(l);
       }
+      combined.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
       callback(combined);
     },
     async (err) => {
       console.warn('[mobileStripeService] subscribeToClientTransactions error:', err);
       const local = await getLocal();
+      local.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
       callback(local);
     }
   );

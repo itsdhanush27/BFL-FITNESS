@@ -14,6 +14,8 @@ import {
   subscribeToClientWorkouts,
   subscribeToNutrition,
   subscribeToProgressMetrics,
+  subscribeToClientCheckIns,
+  subscribeToClientIntake,
 } from '../../services/firestoreService';
 import { Card } from '../../components/Card';
 import { Button } from '../../components/Button';
@@ -22,7 +24,7 @@ import { StatCard } from '../../components/StatCard';
 import { SubscriptionBanner } from '../../components/SubscriptionBanner';
 import { Colors, FontSizes, FontWeights, Spacing, BorderRadius, Shadows } from '../../constants/theme';
 import { canReceiveCoaching, getSubscriptionStatus } from '../../types';
-import type { AssignedWorkout, NutritionPlan, ProgressMetricPoint } from '../../types';
+import type { AssignedWorkout, NutritionPlan, ProgressMetricPoint, WeeklyCheckIn, IntakeFormData } from '../../types';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { HomeStackParamList } from '../../navigation/RootNavigator';
 
@@ -35,12 +37,14 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation }) => {
   const [workouts, setWorkouts] = useState<AssignedWorkout[]>([]);
   const [nutrition, setNutrition] = useState<NutritionPlan | null>(null);
   const [latestMetric, setLatestMetric] = useState<ProgressMetricPoint | null>(null);
+  const [latestCheckIn, setLatestCheckIn] = useState<WeeklyCheckIn | null>(null);
+  const [intake, setIntake] = useState<IntakeFormData | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     if (!user?.uid) return;
 
-    // Workouts listener
+    // Workouts listener (filters drafts, sorts newest first)
     const unsubWorkouts = subscribeToClientWorkouts(user.uid, (data) => {
       setWorkouts(data);
     });
@@ -57,10 +61,24 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation }) => {
       }
     });
 
+    // Weekly Check-Ins listener
+    const unsubCheckIns = subscribeToClientCheckIns(user.uid, (data) => {
+      if (data.length > 0) {
+        setLatestCheckIn(data[0]);
+      }
+    });
+
+    // Intake listener
+    const unsubIntake = subscribeToClientIntake(user.uid, (data) => {
+      setIntake(data);
+    });
+
     return () => {
       unsubWorkouts();
       unsubNutrition();
       unsubMetrics();
+      unsubCheckIns();
+      unsubIntake();
     };
   }, [user?.uid]);
 
@@ -98,7 +116,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation }) => {
         <SubscriptionBanner
           user={user}
           onRenew={() => {
-            // Can deep link or show renew prompt
+            navigation.getParent()?.navigate('Profile');
           }}
         />
 
@@ -236,7 +254,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation }) => {
             <View>
               <Text style={styles.progressLabel}>Latest Weight</Text>
               <Text style={styles.progressVal}>
-                {latestMetric?.weightKg || user?.waistCm ? `${latestMetric?.weightKg || '--'} kg` : 'Not recorded'}
+                {latestCheckIn?.weightKg || latestMetric?.weightKg || intake?.currentWeightKg || (user as any)?.currentWeightKg || (user as any)?.startingWeightKg
+                  ? `${latestCheckIn?.weightKg || latestMetric?.weightKg || intake?.currentWeightKg || (user as any)?.currentWeightKg || (user as any)?.startingWeightKg} kg`
+                  : 'Not recorded'}
               </Text>
             </View>
             <View style={styles.progressDivider} />

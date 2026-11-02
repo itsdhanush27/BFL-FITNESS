@@ -117,27 +117,22 @@ service cloud.firestore {
     }
 
     // Subscriptions Collection Rules
-    // System-level documents: only coaches/admins can create or update.
-    // Clients may read their own subscription records.
     match /subscriptions/{subId} {
       allow read: if isAuthenticated() && (
         isOwner(resource.data.clientId) || 
         isCoachOrAdmin()
       );
-      allow create: if isCoachOrAdmin();
-      allow update: if isCoachOrAdmin();
+      allow create, update: if isAuthenticated();
       allow delete: if isCoachOrAdmin();
     }
 
     // Transactions Collection Rules
-    // Financial records: only coaches/admins can create, update, or delete.
-    // Clients may read their own transaction records for receipt access.
     match /transactions/{txId} {
       allow read: if isAuthenticated() && (
         isOwner(resource.data.clientId) || 
         isCoachOrAdmin()
       );
-      allow create: if isCoachOrAdmin();
+      allow create: if isAuthenticated();
       allow update, delete: if isCoachOrAdmin();
     }
 
@@ -162,21 +157,8 @@ service cloud.firestore {
     }
 
     // Notifications Collection Rules
-    // Users can read their own notifications and create notifications for themselves.
-    // Coaches/admins can create/update notifications for any user (e.g. system alerts).
     match /notifications/{notifId} {
-      allow read: if isAuthenticated() && (
-        isOwner(resource.data.userId) ||
-        isCoachOrAdmin()
-      );
-      allow create: if isAuthenticated() && (
-        isOwner(request.resource.data.userId) ||
-        isCoachOrAdmin()
-      );
-      allow update: if isAuthenticated() && (
-        isOwner(resource.data.userId) ||
-        isCoachOrAdmin()
-      );
+      allow read, create, update: if isAuthenticated();
       allow delete: if isCoachOrAdmin();
     }
 

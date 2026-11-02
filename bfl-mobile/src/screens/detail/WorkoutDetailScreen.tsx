@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,8 +11,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { db, doc, getDoc } from '../../services/firebase';
-import { completeWorkout } from '../../services/firestoreService';
+import { subscribeToWorkout, updateWorkoutSets, completeWorkout } from '../../services/firestoreService';
 import { consumeHourlySessionCredit } from '../../services/stripeService';
 import { useAuth } from '../../contexts/AuthContext';
 import { Header } from '../../components/Header';
@@ -36,30 +35,41 @@ export const WorkoutDetailScreen: React.FC<Props> = ({ route, navigation }) => {
   const [feedback, setFeedback] = useState('');
   const [duration, setDuration] = useState('45');
   const [submitting, setSubmitting] = useState(false);
+  const syncTimerRef = useRef<any>(null);
 
   // Active rest timer state
   const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
   const [timerActive, setTimerActive] = useState(false);
 
+  // Real-time listener: replaces one-time getDoc to maintain 1:1 real-time parity with web
   useEffect(() => {
-    async function loadWorkout() {
-      try {
-        const snap = await getDoc(doc(db, 'workouts', workoutId));
-        if (snap.exists()) {
-          const data = { id: snap.id, ...snap.data() } as AssignedWorkout;
-          setWorkout(data);
-          setExercises(data.exercises || []);
-          if (data.rating) setRating(data.rating);
-          if (data.feedback) setFeedback(data.feedback);
-          if (data.durationMinutes) setDuration(data.durationMinutes.toString());
+    if (!workoutId) return;
+    setLoading(true);
+
+    const unsubscribe = subscribeToWorkout(workoutId, (data) => {
+      if (data) {
+        setWorkout(data);
+        // Only set exercises if not actively editing or if initial load
+        setExercises((prev) => {
+          if (prev.length === 0 || data.isCompleted) {
+            return data.exercises || [];
+          }
+          // If remote update has different exercises, preserve them
+          return data.exercises || prev;
+        });
+        if (data.rating) setRating(data.rating);
+        if (data.feedback || data.clientGeneralFeedback) {
+          setFeedback(data.feedback || data.clientGeneralFeedback || '');
         }
-      } catch (err) {
-        console.error('[WorkoutDetailScreen] load error:', err);
-      } finally {
-        setLoading(false);
+        if (data.durationMinutes) setDuration(data.durationMinutes.toString());
       }
-    }
-    loadWorkout();
+      setLoading(false);
+    });
+
+    return () => {
+      unsubscribe();
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    };
   }, [workoutId]);
 
   // Timer countdown
@@ -80,6 +90,11 @@ export const WorkoutDetailScreen: React.FC<Props> = ({ route, navigation }) => {
     setTimerActive(true);
   };
 
+  /**
+   * Updates exercise set with two-way real-time Firestore persistence.
+   * Checkbox completions trigger immediate Firestore writes.
+   * Numerical edits debounce 400ms to allow smooth typing while immediately syncing to web.
+   */
   const handleUpdateSet = (
     exerciseIndex: number,
     setIndex: number,
@@ -93,6 +108,23 @@ export const WorkoutDetailScreen: React.FC<Props> = ({ route, navigation }) => {
       targetSets[setIndex] = { ...targetSets[setIndex], [field]: value };
       targetExercise.sets = targetSets;
       updated[exerciseIndex] = targetExercise;
+
+      // Two-way synchronization with Firestore (triggers web app listeners)
+      if (workout?.id) {
+        if (field === 'completed') {
+          updateWorkoutSets(workout.id, updated).catch((err) =>
+            console.warn('[WorkoutDetailScreen] live set sync error:', err)
+          );
+        } else {
+          if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+          syncTimerRef.current = setTimeout(() => {
+            updateWorkoutSets(workout.id, updated).catch((err) =>
+              console.warn('[WorkoutDetailScreen] live set sync error:', err)
+            );
+          }, 400);
+        }
+      }
+
       return updated;
     });
   };
@@ -120,7 +152,7 @@ export const WorkoutDetailScreen: React.FC<Props> = ({ route, navigation }) => {
         }
       }
 
-      Alert.alert('Session Logged!', 'Great work! Your session has been submitted to your coach.', [
+      Alert.alert('Session Logged!', 'Great work! Your session has been submitted to your coach and synced in real time.', [
         { text: 'Done', onPress: () => navigation.goBack() },
       ]);
     } catch (err) {

@@ -174,11 +174,24 @@ export const ProgressAnalyticsView: React.FC<ProgressAnalyticsViewProps> = ({
       });
     });
 
-    // 3. Fallback for demo mock user client_alex only if no intake or checkins exist
-    if (list.length === 0 && targetClientId === 'client_alex') {
-      const logged = (progressMetrics || []).filter(m => m.clientId === 'client_alex');
-      logged.forEach(m => list.push(m));
-    }
+    // 3. Include any direct metric points logged for this client (e.g. from mobile or direct logs)
+    const clientDirectMetrics = (progressMetrics || []).filter(m => 
+      m.clientId === targetClientId || 
+      (targetClientId && m.clientId && m.clientId.toLowerCase() === targetClientId.toLowerCase()) ||
+      (targetClientId === 'client_alex' && m.clientId === 'client_alex')
+    );
+    clientDirectMetrics.forEach(m => {
+      if (!list.some(existing => existing.date === m.date)) {
+        list.push({
+          ...m,
+          weekLabel: m.date,
+          isBaseline: false,
+        });
+      }
+    });
+
+    // Chronological order for accurate graph trendlines
+    list.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
     return list;
   }, [effectiveIntake, targetClientId, checkIns, progressMetrics, clientInfo]);

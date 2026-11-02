@@ -199,6 +199,7 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   read: boolean;
+  clientId?: string;
 }
 
 export interface ProgressMetricPoint {

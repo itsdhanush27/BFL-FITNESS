@@ -53,6 +53,7 @@ export const ChatScreen: React.FC<Props> = ({ route, navigation }) => {
         senderName: user.displayName || 'Athlete',
         senderRole: user.role || 'client',
         recipientId: coachId,
+        clientId: user.uid,
         text: textToSend,
         timestamp: new Date().toISOString(),
         read: false,

@@ -33,6 +33,7 @@ import type {
   CoachingPlan,
   SubscriptionFields,
 } from '../types';
+import { INITIAL_COACHING_PLANS } from '../data/seedData';
 import { assertClientCanReceiveCoaching } from '../types/subscription';
 
 // ─── User Profile ──────────────────────────────────────────────────────────
@@ -80,17 +81,32 @@ export async function updateUserProfile(userId: string, updates: Partial<UserPro
 
 // ─── Workouts ──────────────────────────────────────────────────────────────
 
+/**
+ * Real-time listener for workouts assigned to a client.
+ * Strictly excludes draft routines so client never sees unpublished programs (matches web).
+ * Sorts with active updatedAt and assignedDate priority.
+ */
 export function subscribeToClientWorkouts(
   clientId: string,
   callback: (workouts: AssignedWorkout[]) => void
 ): () => void {
   const q = query(
     collection(db, 'workouts'),
-    where('clientId', '==', clientId),
-    orderBy('assignedDate', 'desc')
+    where('clientId', '==', clientId)
   );
   return onSnapshot(q, (snap) => {
-    const workouts = snap.docs.map((d) => ({ id: d.id, ...d.data() } as AssignedWorkout));
+    const rawWorkouts = snap.docs.map((d) => ({ id: d.id, ...d.data() } as AssignedWorkout));
+    // Filter out drafts so athlete never sees unpublished programs (1:1 with web)
+    const workouts = rawWorkouts.filter(w => !w.isDraft && w.status !== 'draft');
+
+    // Sort in memory: newest updatedAt or assignedDate first
+    workouts.sort((a: any, b: any) => {
+      const timeA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : (a.updatedAt ? new Date(a.updatedAt).getTime() : 0);
+      const timeB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (b.updatedAt ? new Date(b.updatedAt).getTime() : 0);
+      if (timeA !== timeB) return timeB - timeA;
+      return (b.assignedDate || '').localeCompare(a.assignedDate || '');
+    });
+
     callback(workouts);
   }, (err) => {
     console.error('[firestoreService] subscribeToClientWorkouts error:', err);
@@ -98,9 +114,71 @@ export function subscribeToClientWorkouts(
   });
 }
 
+/**
+ * Real-time listener for the athlete's single active workout (mirrors web's subscribeToAthleteWorkouts).
+ */
+export function subscribeToActiveWorkout(
+  clientId: string,
+  callback: (workout: AssignedWorkout | null) => void
+): () => void {
+  return subscribeToClientWorkouts(clientId, (workouts) => {
+    if (workouts.length === 0) {
+      callback(null);
+      return;
+    }
+    // Priority 1: First active/uncompleted workout
+    const active = workouts.find((w) => !w.isCompleted);
+    if (active) {
+      callback(active);
+      return;
+    }
+    // Priority 2: Latest completed workout
+    callback(workouts[0]);
+  });
+}
+
+/**
+ * Real-time snapshot listener for a specific workout document.
+ * Eliminates stale one-time getDoc fetches so mobile sees coach edits and web updates instantly.
+ */
+export function subscribeToWorkout(
+  workoutId: string,
+  callback: (workout: AssignedWorkout | null) => void
+): () => void {
+  return onSnapshot(
+    doc(db, 'workouts', workoutId),
+    (snap) => {
+      if (snap.exists()) {
+        callback({ id: snap.id, ...snap.data() } as AssignedWorkout);
+      } else {
+        callback(null);
+      }
+    },
+    (err) => {
+      console.error('[firestoreService] subscribeToWorkout error:', err);
+      callback(null);
+    }
+  );
+}
+
+/**
+ * Synchronize live workout set logging directly to Firestore (1:1 with web).
+ */
+export async function updateWorkoutSets(
+  workoutId: string,
+  exercises: any[]
+): Promise<void> {
+  await updateDoc(doc(db, 'workouts', workoutId), {
+    exercises,
+    updatedAt: serverTimestamp(),
+  });
+}
+
 export async function updateWorkout(workoutId: string, updates: Partial<AssignedWorkout>): Promise<void> {
+  const feedbackVal = updates.feedback ?? updates.clientGeneralFeedback;
   await updateDoc(doc(db, 'workouts', workoutId), {
     ...updates,
+    ...(feedbackVal !== undefined ? { feedback: feedbackVal, clientGeneralFeedback: feedbackVal } : {}),
     updatedAt: serverTimestamp(),
   });
 }
@@ -113,18 +191,37 @@ export async function completeWorkout(
   durationMinutes: number,
   exercises: any[]
 ): Promise<void> {
+  const normalizedRating = Math.min(Math.max(rating, 1), 5);
+  const cleanFeedback = (feedback || '').slice(0, 1000);
+  const completedDate = new Date().toISOString().split('T')[0];
+  const completedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
   await updateDoc(doc(db, 'workouts', workoutId), {
     isCompleted: true,
-    completedAt: new Date().toISOString(),
-    completedDate: new Date().toISOString().split('T')[0],
-    rating: Math.min(Math.max(rating, 1), 5),
-    feedback: feedback.slice(0, 1000),
-    clientGeneralFeedback: feedback.slice(0, 1000),
+    completedAt: completedTime,
+    completedDate,
+    rating: normalizedRating,
+    feedback: cleanFeedback,
+    clientGeneralFeedback: cleanFeedback,
     durationMinutes,
     exercises,
     status: 'completed',
     updatedAt: serverTimestamp(),
   });
+
+  // Notify coach of completed session (mirrors web FitnessDataContext)
+  saveNotificationToFirestore({
+    userId: 'admin_mass_narimanian',
+    recipientRole: 'coach',
+    title: 'Daily Workout Completed',
+    message: `Athlete completed workout session (${durationMinutes} min, Rating: ${normalizedRating}/5). ${cleanFeedback ? `Notes: "${cleanFeedback.slice(0, 80)}"` : ''}`,
+    type: 'workout_completed',
+    actionTab: 'clients',
+    timestamp: new Date().toISOString(),
+    read: false,
+    actorName: 'Athlete',
+    actorRole: 'client',
+  }).catch(() => {});
 }
 
 // ─── Nutrition ─────────────────────────────────────────────────────────────
@@ -153,11 +250,12 @@ export function subscribeToClientCheckIns(
 ): () => void {
   const q = query(
     collection(db, 'checkins'),
-    where('clientId', '==', clientId),
-    orderBy('weekNumber', 'desc')
+    where('clientId', '==', clientId)
   );
   return onSnapshot(q, (snap) => {
     const items = snap.docs.map((d) => ({ id: d.id, ...d.data() } as WeeklyCheckIn));
+    // Sort in memory by weekNumber desc (prevents Firestore composite index errors)
+    items.sort((a, b) => (b.weekNumber || 0) - (a.weekNumber || 0));
     callback(items);
   }, (err) => {
     console.error('[firestoreService] subscribeToClientCheckIns error:', err);
@@ -168,12 +266,36 @@ export function subscribeToClientCheckIns(
 export async function submitWeeklyCheckIn(
   data: Omit<WeeklyCheckIn, 'id'>
 ): Promise<string> {
+  const cleanData = cleanPayload(data);
   const docRef = await addDoc(collection(db, 'checkins'), {
-    ...data,
+    ...cleanData,
+    submissionDate: cleanData.submissionDate || new Date().toISOString().split('T')[0],
     reviewedByCoach: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+
+  // Notify coach of new weekly check-in (1:1 with web)
+  saveNotificationToFirestore({
+    userId: 'admin_mass_narimanian',
+    recipientRole: 'coach',
+    title: 'Weekly Check-In Submitted',
+    message: `${cleanData.clientName || 'Athlete'} submitted Week ${cleanData.weekNumber || 1} check-in (${cleanData.weightKg}kg). Review biofeedback and physique photos.`,
+    type: 'checkin_submitted',
+    actionTab: 'clients',
+    timestamp: new Date().toISOString(),
+    read: false,
+    actorName: cleanData.clientName || 'Athlete',
+    actorRole: 'client',
+  }).catch(() => {});
+
+  // Sync current weight to client profile
+  if (cleanData.clientId && cleanData.weightKg) {
+    updateUserProfile(cleanData.clientId, {
+      currentWeightKg: Number(cleanData.weightKg),
+    } as any).catch(() => {});
+  }
+
   return docRef.id;
 }
 
@@ -184,18 +306,23 @@ export function subscribeToMessages(
   coachId: string,
   callback: (messages: ChatMessage[]) => void
 ): () => void {
+  // Query messages by clientId matching the user/client id (identical to web app)
   const q = query(
     collection(db, 'messages'),
-    orderBy('timestamp', 'asc')
+    where('clientId', '==', userId)
   );
   return onSnapshot(q, (snap) => {
     const msgs = snap.docs
       .map((d) => ({ id: d.id, ...d.data() } as ChatMessage))
       .filter(
         (m) =>
+          !coachId ||
           (m.senderId === userId && m.recipientId === coachId) ||
-          (m.senderId === coachId && m.recipientId === userId)
+          (m.senderId === coachId && m.recipientId === userId) ||
+          !m.recipientId
       );
+    // Sort in memory by timestamp ascending
+    msgs.sort((a, b) => new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime());
     callback(msgs);
   }, (err) => {
     console.error('[firestoreService] subscribeToMessages error:', err);
@@ -203,9 +330,11 @@ export function subscribeToMessages(
   });
 }
 
-export async function sendMessage(message: Omit<ChatMessage, 'id'>): Promise<string> {
+export async function sendMessage(message: Omit<ChatMessage, 'id'> & { clientId?: string }): Promise<string> {
+  const clientId = message.clientId || message.senderId;
   const docRef = await addDoc(collection(db, 'messages'), {
-    ...message,
+    ...cleanPayload(message),
+    clientId,
     createdAt: serverTimestamp(),
   });
   return docRef.id;
@@ -219,11 +348,12 @@ export function subscribeToProgressMetrics(
 ): () => void {
   const q = query(
     collection(db, 'metrics'),
-    where('clientId', '==', clientId),
-    orderBy('date', 'asc')
+    where('clientId', '==', clientId)
   );
   return onSnapshot(q, (snap) => {
     const items = snap.docs.map((d) => ({ id: d.id, ...d.data() } as ProgressMetricPoint));
+    // Sort in memory by date asc (prevents Firestore composite index errors)
+    items.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     callback(items);
   }, (err) => {
     console.error('[firestoreService] subscribeToProgressMetrics error:', err);
@@ -247,11 +377,12 @@ export function subscribeToProgressPhotos(
 ): () => void {
   const q = query(
     collection(db, 'progress_photos'),
-    where('clientId', '==', clientId),
-    orderBy('date', 'asc')
+    where('clientId', '==', clientId)
   );
   return onSnapshot(q, (snap) => {
     const items = snap.docs.map((d) => ({ id: d.id, ...d.data() } as ProgressPhotoRecord));
+    // Sort in memory by date asc (prevents Firestore composite index errors)
+    items.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     callback(items);
   }, (err) => {
     console.error('[firestoreService] subscribeToProgressPhotos error:', err);
@@ -276,13 +407,16 @@ export function subscribeToNotifications(
 ): () => void {
   const q = query(
     collection(db, 'notifications'),
-    orderBy('timestamp', 'desc'),
-    limit(50)
+    where('userId', '==', userId)
   );
   return onSnapshot(q, (snap) => {
-    const items = snap.docs
-      .map((d) => ({ id: d.id, ...d.data() } as InAppNotification))
-      .filter((n) => !n.userId || n.userId === userId);
+    const items = snap.docs.map((d) => ({ id: d.id, ...d.data() } as InAppNotification));
+    // Sort in memory descending (prevents composite index requirements)
+    items.sort((a: any, b: any) => {
+      const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : new Date(a.timestamp || 0).getTime();
+      const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : new Date(b.timestamp || 0).getTime();
+      return timeB - timeA;
+    });
     callback(items);
   }, (err: any) => {
     if (err?.code === 'permission-denied' || err?.message?.includes('Missing or insufficient permissions')) {
@@ -318,16 +452,43 @@ export async function getClientIntake(clientId: string): Promise<IntakeFormData 
   }
 }
 
+/**
+ * Real-time listener for client onboarding intake (baseline metrics & starting photos).
+ */
+export function subscribeToClientIntake(
+  clientId: string,
+  callback: (intake: IntakeFormData | null) => void
+): () => void {
+  const q = query(
+    collection(db, 'intakes'),
+    where('clientId', '==', clientId),
+    limit(1)
+  );
+  return onSnapshot(q, (snap) => {
+    if (snap.empty) {
+      callback(null);
+      return;
+    }
+    const d = snap.docs[0];
+    callback({ id: d.id, ...d.data() } as IntakeFormData);
+  }, (err) => {
+    console.error('[firestoreService] subscribeToClientIntake error:', err);
+    callback(null);
+  });
+}
+
 // ─── Coaching Plans ────────────────────────────────────────────────────────
 
 export async function getCoachingPlans(): Promise<CoachingPlan[]> {
   try {
     const snap = await getDocs(collection(db, 'plans'));
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() } as CoachingPlan));
+    if (!snap.empty) {
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() } as CoachingPlan));
+    }
   } catch (err) {
-    console.error('[firestoreService] getCoachingPlans error:', err);
-    return [];
+    console.debug('[firestoreService] getCoachingPlans notice (falling back to catalog):', err);
   }
+  return INITIAL_COACHING_PLANS;
 }
 
 // ─── Helpers & Subscription Access ─────────────────────────────────────────
