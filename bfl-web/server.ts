@@ -45,11 +45,12 @@ app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
 // Standard JSON parser for all other routes
 app.use(express.json());
 
-// CORS for local development / Expo mobile access
+// CORS and security headers for local development & production popups
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Stripe-Signature');
+  res.header('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
