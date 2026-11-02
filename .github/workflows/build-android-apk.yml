@@ -40,8 +40,12 @@ jobs:
           distribution: 'temurin'
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Install Mobile Dependencies
         working-directory: bfl-mobile
@@ -67,7 +71,7 @@ jobs:
 
       - name: Expo Prebuild (Generate Native Android Project)
         working-directory: bfl-mobile
-        run: npx expo prebuild --platform android --clean
+        run: npx expo prebuild --platform android --clean --no-install
 
       - name: Grant Execute Permission to Gradle Wrapper
         working-directory: bfl-mobile/android
@@ -80,7 +84,11 @@ jobs:
       - name: Sign APK (Ensures Instant Installation On Android)
         working-directory: bfl-mobile
         run: |
-          RAW_APK=$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          RAW_APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ]; then
+            RAW_APK=$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          fi
+          
           if [ -z "$RAW_APK" ]; then
             echo "::error::No APK file found in build outputs!"
             exit 1
@@ -90,6 +98,8 @@ jobs:
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
           echo "Using apksigner at: $APKSIGNER"
 
+          mkdir -p release-output
+
           # Check if custom keystore secret is supplied
           if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
             echo "Using custom keystore from repository secrets..."
@@ -98,7 +108,7 @@ jobs:
               --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS || 'bflfitness' }}" \
               --ks-pass pass:"${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
               --key-pass pass:"${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}" \
-              --out android/app/build/outputs/apk/release/app-signed.apk "$RAW_APK"
+              --out release-output/final-app.apk "$RAW_APK"
           else
             echo "Generating release signing key for distribution..."
             keytool -genkey -v -keystore release.keystore -alias bflfitness -keyalg RSA -keysize 2048 -validity 10000 \
@@ -109,13 +119,10 @@ jobs:
               --ks-key-alias bflfitness \
               --ks-pass pass:bflfitness123 \
               --key-pass pass:bflfitness123 \
-              --out android/app/build/outputs/apk/release/app-signed.apk "$RAW_APK"
+              --out release-output/final-app.apk "$RAW_APK"
           fi
 
-          if [ -f "android/app/build/outputs/apk/release/app-signed.apk" ]; then
-            mv android/app/build/outputs/apk/release/app-signed.apk "$RAW_APK"
-            echo "Successfully verified and signed APK."
-          fi
+          echo "APK successfully signed and verified."
 
       - name: Package & Label APK
         id: package_apk
@@ -125,9 +132,8 @@ jobs:
             VERSION="${{ github.event.inputs.version_name || 'v1.0.0' }}"
           fi
 
-          SOURCE_APK=$(find bfl-mobile/android/app/build/outputs/apk -name "*.apk" | head -n 1)
           DIST_NAME="BFL-Fitness-${VERSION}.apk"
-          cp "$SOURCE_APK" "$DIST_NAME"
+          cp bfl-mobile/release-output/final-app.apk "$DIST_NAME"
 
           echo "apk_file=$DIST_NAME" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -157,14 +163,8 @@ jobs:
             2. Tap the file in your notifications or Downloads folder to install.
             3. If prompted by Android, enable **"Install unknown apps"** for your browser or file manager.
             4. Open **BFL Fitness** and log in!
-
-            *SHA256 Checksum:*
-            ```text
-            $(sha256sum ${{ steps.package_apk.outputs.apk_file }} | awk '{print $1}')
-            ```
           files: ${{ steps.package_apk.outputs.apk_file }}
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
