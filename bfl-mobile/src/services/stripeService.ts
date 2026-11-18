@@ -46,7 +46,8 @@ import {
 
 // Backend API base URL for server-side Stripe operations (never store secret keys in mobile client)
 const BACKEND_API_BASE =
-  process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3000';
+  process.env.EXPO_PUBLIC_API_URL ||
+  (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3000' : 'https://bfl-fitness-csax.vercel.app');
 
 // Optional publishable key for client-side Stripe configuration
 export const STRIPE_PUBLISHABLE_KEY =

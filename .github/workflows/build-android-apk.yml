@@ -64,7 +64,7 @@ jobs:
             API_URL="${{ vars.EXPO_PUBLIC_API_URL }}"
           fi
           if [ -z "$API_URL" ]; then
-            API_URL="https://bfl-fitness.vercel.app"
+            API_URL="https://bfl-fitness-csax.vercel.app"
           fi
           
           echo "EXPO_PUBLIC_API_URL=$API_URL" > .env
