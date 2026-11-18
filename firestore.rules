@@ -119,7 +119,8 @@ service cloud.firestore {
     // Subscriptions Collection Rules
     match /subscriptions/{subId} {
       allow read: if isAuthenticated() && (
-        isOwner(resource.data.clientId) || 
+        subId == request.auth.uid ||
+        (resource != null && 'clientId' in resource.data && isOwner(resource.data.clientId)) || 
         isCoachOrAdmin()
       );
       allow create, update: if isAuthenticated();
@@ -129,7 +130,7 @@ service cloud.firestore {
     // Transactions Collection Rules
     match /transactions/{txId} {
       allow read: if isAuthenticated() && (
-        isOwner(resource.data.clientId) || 
+        (resource != null && 'clientId' in resource.data && isOwner(resource.data.clientId)) || 
         isCoachOrAdmin()
       );
       allow create: if isAuthenticated();

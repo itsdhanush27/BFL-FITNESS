@@ -39,6 +39,27 @@ const stripe = STRIPE_KEY
     })
   : (null as any);
 
+// Route path normalization: support both direct (/api/stripe/...) and rewritten (/stripe/...) routes on Vercel
+app.use((req, res, next) => {
+  if (req.url && !req.url.startsWith('/api') && (
+    req.url.startsWith('/stripe') || 
+    req.url.startsWith('/cron') || 
+    req.url.startsWith('/health')
+  )) {
+    req.url = '/api' + req.url;
+  }
+  next();
+});
+
+// Health / Status endpoint
+app.get(['/api/health', '/health'], (_req, res) => {
+  res.json({
+    status: 'ok',
+    stripeConfigured: Boolean(stripe),
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Capture raw body for Stripe webhook signature verification
 app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
 
@@ -1188,19 +1209,21 @@ app.post('/api/stripe/webhook', async (req, res) => {
   }
 });
 
-// ─── Static files for production standalone mode ────────────────────────────
-if (process.env.NODE_ENV === 'production') {
-  const distPath = path.join(__dirname, 'dist');
+// ─── Static files for production standalone mode (only when run directly via node/tsx, not in serverless) ────
+const isDirectRun = Boolean(
+  process.argv[1] && (
+    process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js')
+  )
+);
+
+if (process.env.NODE_ENV === 'production' && isDirectRun) {
+  const distPath = path.join(process.cwd(), 'dist');
   app.use(express.static(distPath));
 
   app.get('*', (_req, res) => {
     res.sendFile(path.join(distPath, 'index.html'));
   });
 }
-
-const isDirectRun = process.argv[1] && (
-  process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js')
-);
 
 if (isDirectRun) {
   app.listen(PORT, () => {
